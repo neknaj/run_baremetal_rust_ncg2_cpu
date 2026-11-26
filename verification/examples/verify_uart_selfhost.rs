@@ -1,6 +1,6 @@
 //! Core を含む ELF の転送、実行、QEMU との照合を行う。
 
-use std::{collections::BTreeMap, error::Error, fs, path::Path, time::Instant};
+use std::{collections::BTreeMap, error::Error, fs, path::Path, time::{Duration, Instant}};
 
 use circuitgame2_core::netlist::{ClockedVm, Wire};
 use ncg2_event_queue::{fanout::Pin, nor_groups::classify_nor_group};
@@ -178,6 +178,7 @@ fn reference_pcs(path: &Path) -> Result<Vec<u64>, Box<dyn Error>> {
 #[derive(Default)]
 struct PhaseMetrics {
     ticks: u64,
+    elapsed: Duration,
     evaluations: u64,
     chain_evaluations: u64,
     grouped_nor_evaluations: u64,
@@ -216,6 +217,13 @@ impl PhaseMetrics {
             self.commit_ticks,
             self.write_ticks,
         );
+        if self.ticks != 0 {
+            let seconds = self.elapsed.as_secs_f64();
+            println!(
+                "  経過時間 {seconds:.6} s、平均 {:.2} µs/tick",
+                seconds * 1_000_000.0 / self.ticks as f64,
+            );
+        }
         println!(
             "  NOR 候補 {} 評価、候補群の稼働 {} 回、同じ群で4ゲート以上を評価 {} 回",
             self.grouped_nor_evaluations, self.outer_group_ticks, self.dense_group_ticks,
@@ -256,6 +264,8 @@ fn flash(
     }
     for (index, &bytes) in words.iter().enumerate() {
         let start = machine.tick;
+        let started = metrics.as_ref().map(|_| Instant::now());
+        let mut waveform_end = None;
         let acknowledged = uart::send(bytes, |rx| -> Result<bool, Box<dyn Error>> {
             let ready = match metrics.as_deref_mut() {
                 Some(metrics) => {
@@ -265,7 +275,8 @@ fn flash(
                         chain_evaluations += u64::from(metrics.chain_nodes[node]);
                         grouped_nor_evaluations += u64::from(metrics.grouped_nor.observe(node));
                     })?;
-                    let phase = if machine.tick - start <= WORD_TICKS {
+                    let word_tick = machine.tick - start;
+                    let phase = if word_tick <= WORD_TICKS {
                         &mut metrics.waveform
                     } else {
                         &mut metrics.ack
@@ -279,6 +290,10 @@ fn flash(
                         output[194],
                         output[196],
                     );
+                    // 各語の送信波形が終わる境界で時刻を取り、tick ごとの時計読み出しを避ける。
+                    if word_tick == WORD_TICKS {
+                        waveform_end = Some(Instant::now());
+                    }
                     ready
                 }
                 None => machine.step(rx)?,
@@ -289,6 +304,10 @@ fn flash(
             Ok(ready)
         })
         .map_err(|cause| format!("UART 転送語 {index}: {cause}"))?;
+        if let (Some(metrics), Some(started), Some(end)) = (&mut metrics, started, waveform_end) {
+            metrics.ack.elapsed += end.elapsed();
+            metrics.waveform.elapsed += end.duration_since(started);
+        }
         if !acknowledged {
             return Err(format!(
                 "転送語 {index} の ACK を受け取れない。PC={:#x}",
