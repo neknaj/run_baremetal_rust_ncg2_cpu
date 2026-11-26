@@ -43,3 +43,23 @@ ncg2 check programs/boot.ncg2m
 ```
 
 次は、命令デコーダをレジスタ・ALU・PC に接続する。プログラムはプロジェクトに置いた命令イメージから NCG2M で ROM を生成し、通常のシミュレーションで読み出せるようにする。
+
+## 算術回路を検証する
+
+`::rv64::arithmetic::add` は64ビットの折り返し加算、`::rv64::arithmetic::shift-left` は0から63ビットの論理左シフトを行う。検証ツールは Core が展開した NOR ネットリストを読み、参照演算と出力が異なる入力が存在するかを Z3 に問い合わせる。
+
+```sh
+set -e
+host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+mkdir -p target/verification
+for circuit in add shift-left; do
+  model="target/verification/$circuit.smt2"
+  cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
+    --target "$host" --target-dir target/verification -- "$circuit" > "$model"
+  result=$(z3 -smt2 "$model")
+  printf '%s\n' "$result"
+  test "$result" = unsat
+done
+```
+
+両方の結果が `unsat` なら、その回路の出力は全入力で参照演算と一致する。

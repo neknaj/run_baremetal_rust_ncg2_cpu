@@ -1,0 +1,8 @@
+[package]
+name = "ncg2-rv64-arithmetic-proof"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+circuitgame2-core = { git = "https://github.com/neknaj/circuitgame2-core.git", rev = "92a09047cbd405e83e7af21ab486b47c1a87dfde" }
