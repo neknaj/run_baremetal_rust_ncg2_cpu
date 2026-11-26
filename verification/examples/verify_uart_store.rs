@@ -274,7 +274,8 @@ fn verify_instruction_controls(
         return Err("通常退役が同じ issue の1024 tick 後を起点とする経路を特定できない。".into());
     }
     let (finished, _) = latch(vm, mul_finished, 1)?;
-    let [_, running] = and_inputs(net, finished.data[0]).ok_or("乗算完了通知が AND でない。")?;
+    let [rising, running] =
+        and_inputs(net, finished.data[0]).ok_or("乗算完了通知が AND でない。")?;
     let (run, _) = latch(vm, running, 1)?;
     let initialized = delay_source(vm, run.data[0], 2)?;
     if or_inputs(net, run.enable).and_then(|inputs| other_input(inputs, mul_finished))
@@ -284,6 +285,28 @@ fn verify_instruction_controls(
         return Err("乗算の開始と完了通知の接続が異なる。".into());
     }
     let start = delay_source(vm, initialized, 8)?;
+    let [no_done, older_done] =
+        nor_inputs(net, rising).ok_or("乗算完了の立ち上がりが NOR でない。")?;
+    let done = inverted_input(net, no_done).ok_or("乗算完了の立ち上がりに done の反転がない。")?;
+    if delay_source(vm, older_done, 2)? != done {
+        return Err("乗算完了の立ち上がりが同じ done の2 tick 遅延を比較していない。".into());
+    }
+    let (done_latch, _) = latch(vm, done, 1)?;
+    let capture = done_latch.enable;
+    let (capture_latch, _) = latch(vm, capture, 1)?;
+    let repeat = or_inputs(net, capture_latch.data[0])
+        .and_then(|inputs| other_input(inputs, start))
+        .ok_or("乗算状態の取り込みが開始か反復の OR でない。")?;
+    let (repeat_latch, _) = latch(vm, repeat, 1)?;
+    let [request, not_yet] = and_inputs(net, repeat_latch.data[0])
+        .ok_or("乗算反復が遅延した要求と実行条件の AND でない。")?;
+    if delay_source(vm, capture_latch.enable, 2)? != Wire::Constant(true)
+        || delay_source(vm, repeat_latch.enable, 4)? != Wire::Constant(true)
+        || delay_source(vm, request, 512)? != capture
+        || and_inputs(net, not_yet) != Some([running, no_done])
+    {
+        return Err("乗算状態の取り込み間隔または反復の抑止条件が異なる。".into());
+    }
     let (start_latch, _) = latch(vm, start, 1)?;
     let mul_request = and_inputs(net, start_latch.data[0])
         .and_then(|inputs| other_input(inputs, ready))
