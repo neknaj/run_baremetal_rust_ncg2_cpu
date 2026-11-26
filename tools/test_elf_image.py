@@ -84,8 +84,10 @@ class LoaderTests(unittest.TestCase):
         bss = (1, 6, 0x208, 0x11000, 0x11000, 0, 8, 1)
         stack = (1, 6, 0x208, 0x2C000, 0x2C000, 0, 0x4000, 1)
         image = memory_image(executable([code, bss, stack], bytes(range(8))), for_rom=True)
-        self.assertIn(b"(def word-0 #x0706050403020100)", ncg2_rom_source(image))
-        self.assertIn(b"(def word-1 #x0000000000000000)", ncg2_rom_source(image))
+        self.assertEqual(image[:16], bytes(range(8)) + bytes(8))
+        rom = ncg2_rom_source(image)
+        self.assertIn(b"(word-index (bits 5))", rom)
+        self.assertEqual(rom, ncg2_rom_source(image))
 
     def test_rom_rejects_bytes_and_zero_init_outside_their_banks(self):
         code = (1, 5, 0x200, BASE, BASE, 4, 4, 1)

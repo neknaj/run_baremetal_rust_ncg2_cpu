@@ -12,6 +12,8 @@
 
 `ncg2-rom` の生成では ELF のロード領域全体を検査する。読み取り専用領域は ROM に収める。書き込み可能でファイルによる初期化が不要な領域は、いずれか一方の RAM に収める。リンカは BSS とスタックを別々の `PT_LOAD` に置く。リセット時の RAM は全語を0にする。
 
+ROM の生成では各出力ビットを選択回路に分解する。2つの候補が同じ信号なら選択を省き、同じ入力を持つ NOR は出力ビットをまたいで共有する。同梱 ELF の命令フェッチでは展開後の NOR が14,463個から1,450個に減った。
+
 ## RAM の更新と読み出し
 
 `firmware-data-memory` は各 tick のアドレス、データ、許可を1件の書き込み要求として受け取る。tick `t` の要求が書き込み可能な語を指すとき、その語を `t + 15` に更新する。ROM、未配置、非整列への書き込み要求で RAM は変わらない。連続した tick に異なるバンクや添字を指定できる。
@@ -38,6 +40,9 @@ for circuit in firmware-rom firmware-fetch firmware-data-map; do
 done
 cargo +1.99.1 test --locked --manifest-path verification/Cargo.toml \
   --target "$host" --target-dir target/verification --test firmware_memory
+cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
+  --target "$host" --target-dir target/verification --example verify_rom \
+  -- circuit/firmware-rom.ncg2 "$image"
 ```
 
-Z3 は ROM の全語、フェッチの有効条件と命令、メモリ区間と添字を展開済み NOR 回路と照合する。区間の検証では、バンク判定の全入力経路が12段であることも実ネットリストから確認する。結合テストは VM で連続する書き込みの確定 tick と RAM の内容を検査する。CPU からの命令実行を含む順序回路全体の形式証明は今後の作業である。
+Z3 は ROM の全語、フェッチの有効条件と命令、メモリ区間と添字を展開済み NOR 回路と照合する。区間の検証では、バンク判定の全入力経路が12段であることも実ネットリストから確認する。`verify_rom` は入力ビット列を全列挙し、展開した ROM の各出力を ELF のバイト列と照合する。結合テストは VM で連続する書き込みの確定 tick と RAM の内容を検査する。CPU からの命令実行を含む順序回路全体の形式証明は今後の作業である。

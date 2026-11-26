@@ -171,11 +171,14 @@ def word_bits(image: bytes) -> bytes:
     return "".join(f"{line}\n" for line in lines).encode("ascii")
 
 
-def ncg2_rom_source(image: bytes) -> bytes:
-    """起動 ELF の先頭256バイトを読む NCG2 回路を生成する。"""
+def ncg2_rom_source(image: bytes, *, address_bits: int = ROM_ADDRESS_BITS) -> bytes:
+    """イメージの先頭を読む NCG2 回路を生成し、同じ選択回路と NOR を共有する。"""
+    if not 1 <= address_bits <= ADDRESS_BITS:
+        raise ValueError("ROM の語添字はイメージを表せる幅にする。")
+    word_count = 1 << address_bits
     words = dict(nonzero_words(image))
-    if any(index >= ROM_WORDS for index in words):
-        raise ElfError(ErrorKind.SEGMENT, "起動 ROM の先頭256バイトより後ろに非ゼロの初期値がある。")
+    if any(index >= word_count for index in words):
+        raise ElfError(ErrorKind.SEGMENT, f"起動 ROM の先頭{word_count * WORD_SIZE}バイトより後ろに非ゼロの初期値がある。")
 
     lines = [
         "(namespace rv64",
@@ -183,22 +186,55 @@ def ncg2_rom_source(image: bytes) -> bytes:
         "",
         "  ;; 起動 ELF の初期化済みデータを、下位バイトから並べた64ビット語で読む。",
         "  ;; tools/elf_image.py --format ncg2-rom で更新する。",
-        f"  (func firmware-rom (in (word-index (bits {ROM_ADDRESS_BITS}))) (out (word (bits 64)))",
+        f"  (func firmware-rom (in (word-index (bits {address_bits}))) (out (word (bits 64)))",
+        "    (def zero 0)",
+        "    (def one 1)",
     ]
-    for bit in range(ROM_ADDRESS_BITS):
+    for bit in range(address_bits):
         lines.append(f"    (def select-{bit} (bit word-index {bit}))")
-    stage = [f"word-{index}" for index in range(ROM_WORDS)]
-    for index, name in enumerate(stage):
-        lines.append(f"    (def {name} #x{words.get(index, 0):016x})")
-    for bit in range(ROM_ADDRESS_BITS):
-        next_stage = []
-        for index in range(0, len(stage), 2):
-            output = "word" if len(stage) == 2 else f"selected-{bit}-{index // 2}"
-            lines.append(f"    (def {output} (::rv64::arithmetic::select select-{bit} "
-                         f"{stage[index]} {stage[index + 1]}))")
-            next_stage.append(output)
-        stage = next_stage
-    lines[-1] += "))"
+    gates: dict[tuple[str, str], str] = {}
+
+    def nor(left: str, right: str) -> str:
+        if left == "one" or right == "one":
+            return "zero"
+        if left == right == "zero":
+            return "one"
+        if left > right:
+            left, right = right, left
+        key = (left, right)
+        if key not in gates:
+            name = f"gate-{len(gates)}"
+            lines.append(f"    (def {name} (nor {left} {right}))")
+            gates[key] = name
+        return gates[key]
+
+    def select(bit: int, low: str, high: str) -> str:
+        if low == high:
+            return low
+        address = f"select-{bit}"
+        inverse = nor(address, address)
+        if low == "zero" and high == "one":
+            return address
+        if low == "one" and high == "zero":
+            return inverse
+        take_low = nor(address, nor(low, low))
+        take_high = nor(inverse, nor(high, high))
+        neither = nor(take_low, take_high)
+        return nor(neither, neither)
+
+    # 添字の下位ビットから組み合わせ、異なる語や出力ビットにも共通する回路を使う。
+    output_bits = []
+    for bit in range(WORD_BITS):
+        stage = ["one" if (words.get(index, 0) >> bit) & 1 else "zero"
+                 for index in range(word_count)]
+        for address_bit in range(address_bits):
+            stage = [select(address_bit, low, high) for low, high in zip(stage[::2], stage[1::2])]
+        output_bits.append(stage[0])
+    for byte in range(WORD_SIZE):
+        signals = " ".join(output_bits[byte * 8:(byte + 1) * 8])
+        lines.append(f"    (def byte-{byte} (concat {signals}))")
+    bytes_in_order = " ".join(f"byte-{byte}" for byte in range(WORD_SIZE))
+    lines.append(f"    (def word (concat {bytes_in_order}))))")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
