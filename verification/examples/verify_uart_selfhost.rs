@@ -486,11 +486,12 @@ fn flash_circuit(machine: &mut Machine, words: &[[u8; 8]], complete: bool) -> Re
     ).into())
 }
 
-fn verify_execution(
+// 退役 PC の照合を共用する。全体検証では、期待した PC 列の直後に停止することも確かめる。
+fn verify_execution_pcs(
     machine: &mut Machine,
     reference: &[u64],
-    expected: (u64, u64),
-) -> Result<(), Box<dyn Error>> {
+    prefix_only: bool,
+) -> Result<u64, Box<dyn Error>> {
     while machine.pc() < ENTRY {
         machine.step(true)?;
     }
@@ -512,7 +513,10 @@ fn verify_execution(
                 .into());
             }
             retired += 1;
-            if retired % 1024 == 0 {
+            if prefix_only && retired == reference.len() {
+                break;
+            }
+            if !prefix_only && retired % 1024 == 0 {
                 println!(
                     "QEMU と {retired}/{} 命令一致、アプリ {} tick",
                     reference.len(),
@@ -522,6 +526,15 @@ fn verify_execution(
         }
         machine.step(true)?;
     }
+    Ok(machine.tick - start)
+}
+
+fn verify_execution(
+    machine: &mut Machine,
+    reference: &[u64],
+    expected: (u64, u64),
+) -> Result<(), Box<dyn Error>> {
+    let ticks = verify_execution_pcs(machine, reference, false)?;
     let stack = machine.storage_index(11)?;
     let status = machine.read_word(stack, STATUS, 11)?;
     let information = machine.read_word(stack, INFORMATION, 11)?;
@@ -533,14 +546,42 @@ fn verify_execution(
         .into());
     }
     println!(
-        "アプリ {} tick、{retired} 命令と結果が一致。status={status:#x} information={information:#x}。",
-        machine.tick - start
+        "アプリ {ticks} tick、{} 命令と結果が一致。status={status:#x} information={information:#x}。",
+        reference.len(),
     );
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if let [flag, project, image, qemu_log, count, limit] = arguments.as_slice()
+        && flag == "--measure-circuit-execution"
+    {
+        let reference = reference_pcs(Path::new(qemu_log))?;
+        let count: usize = count.to_str().ok_or("先頭の命令数を十進整数で指定する。")?.parse()?;
+        if !(1..=reference.len()).contains(&count) {
+            return Err("先頭の命令数が QEMU の実行列の範囲外。".into());
+        }
+        let limit = limit.to_str().ok_or("tick 上限には十進整数を指定する。")?.parse()?;
+        let image = fs::read(image)?;
+        let words = image_words(&image)?;
+        let mut machine = Machine::new(uart::circuit_loader_machine(Path::new(project))?, limit, Loader::Circuit)?;
+        flash_circuit(&mut machine, words, true)?;
+
+        let handoff = machine.tick;
+        let started = Instant::now();
+        verify_execution_pcs(&mut machine, &reference[..count], true)?;
+        let elapsed = started.elapsed().as_secs_f64();
+        let ticks = machine.tick - handoff;
+        if ticks == 0 {
+            return Err("引き渡し後の実行が tick を進めずに終了した。".into());
+        }
+        println!(
+            "先頭 {count} 命令が QEMU と一致。転送と全 RAM 照合の完了から {ticks} tick、経過 {elapsed:.6} s、平均 {:.3} µs/tick。",
+            elapsed * 1_000_000.0 / ticks as f64,
+        );
+        return Ok(());
+    }
     if let [flag, project, image, count] = arguments.as_slice()
         && (flag == "--measure-continuous" || flag == "--measure-continuous-8" || flag == "--measure-circuit-loader")
     {

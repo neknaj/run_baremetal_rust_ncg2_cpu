@@ -54,6 +54,19 @@ Verus のワード演算の契約は、幅以内の各ビットの次の値と�
 
 他の素子からラッチの出力へ書き込みがなければ、確定後にキャッシュと配線が再び一致することを証明した。この前提を実行器全体が各 tick で保つことは証明範囲外であり、64ビットのシフトラッチを標準 VM と比較する結合試験で確認する。
 
+## UART を経由したアプリ実行の区間計測
+
+同じ転送データを使い、転送と RAM の照合が済んだ後の区間を測る。次の例では先頭512命令の退役 PC を順に QEMU と照合する。tick 上限は転送開始から数える。必要な転送データとログは[セルフホストの手順](selfhost.md)で生成できる。
+
+```bash
+cargo run --release --manifest-path verification/Cargo.toml \
+  --example verify_uart_selfhost -- \
+  --measure-circuit-execution uart-circuit-loader.toml \
+  "$work/uart.bin" "$work/qemu.log" 512 120000000
+```
+
+転送と全語の RAM 照合が済んでから、指定した命令を照合し終えるまでの tick 数とホストの経過時間を表示する。ホスト時間には区間内の QEMU ログとの照合を含む。最後の命令まで指定した場合も、計測は退役 PC の照合までで終える。停止位置と終了結果を検査する場合は `--circuit-loader` を使う。
+
 ## 検証コマンド
 
 ```sh
