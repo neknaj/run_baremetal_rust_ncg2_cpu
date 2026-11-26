@@ -4,6 +4,7 @@
 extern crate alloc;
 
 pub mod delay;
+pub mod delay_schedule;
 pub mod fanout;
 pub mod nor_groups;
 pub mod nor_inputs;
