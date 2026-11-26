@@ -21,7 +21,7 @@ ncg2 run --project firmware.toml --ticks 90000 | tail -n 1
 
 `selfhost.toml` では、ベアメタル Rust から Core を呼び、RAM 上のソースを解析する。続いて固定の NOR 回路を評価し、ノード数と出力を書き戻す。[ビルドと検証手順](doc/selfhost.md)
 
-`compile-circuit` を指定してビルドすると、受け取った回路ソースを Core で NOR に展開し、指定した入力で評価できる。この ELF は `uart-boot.toml` の回路へ要求データと一緒に転送する。[ビルドと UART 転送の手順](doc/selfhost.md#ram-の回路ソースを展開する-elf)
+`compile-circuit` を指定してビルドすると、受け取った回路ソースを Core で NOR に展開し、指定した入力で評価できる。この ELF と要求データを `uart-boot.toml` の回路へ転送し、RAM から起動したアプリの退役 PC 50,924件と終了結果が QEMU と一致した。[ビルド、UART 転送と照合の手順](doc/selfhost.md#ram-の回路ソースを展開する-elf)
 
 ## 起動回路の部品を検証する
 
