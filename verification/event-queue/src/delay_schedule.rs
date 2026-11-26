@@ -160,4 +160,41 @@ pub proof fn scheduled_delay_matches_trace(
         update.output_tick as int - origin as int, initial.len() - 1);
 }
 
+
+/// 現在の tick から指定の幅だけ進めても、時刻区間の境界を越えず予定を通過しない。
+pub open spec fn idle_prefix_allowed(
+    now: u64, boundary: u64, next: Option<u64>, requested: u64, span: u64,
+) -> bool {
+    span <= requested
+    && now as int + span <= boundary
+    && (span == 0 || next.is_none() || now as int + span < next.unwrap())
+}
+
+/// 次の末尾更新を含まない範囲で進められる最大の tick 数を返す。
+///
+/// 入力と候補キューの確認は呼び出し側で行う。時刻区間の境界を越える要求には、
+/// 境界までの幅を返す。現在時刻が境界より後ろにある場合は0を返す。
+pub fn idle_prefix(now: u64, boundary: u64, next: Option<u64>, requested: u64) -> (span: u64)
+    ensures
+        now > boundary ==> span == 0,
+        now <= boundary ==> idle_prefix_allowed(now, boundary, next, requested, span),
+        forall|other: u64| #[trigger] idle_prefix_allowed(now, boundary, next, requested, other) ==> other <= span,
+{
+    if now > boundary {
+        return 0;
+    }
+    let remaining = boundary - now;
+    let available = if remaining < requested { remaining } else { requested };
+    if let Some(next_tick) = next {
+        if next_tick <= now {
+            return 0;
+        }
+        let until_event = next_tick - now - 1;
+        if until_event < available {
+            return until_event;
+        }
+    }
+    available
+}
+
 } // verus!

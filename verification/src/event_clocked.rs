@@ -3,7 +3,7 @@
 use circuitgame2_core::netlist::{ClockedVm, TickInputError, Wire};
 use ncg2_event_queue::{
     EvaluationQueue,
-    delay_schedule::{DelayInputEdge, schedule_delay_edge},
+    delay_schedule::{DelayInputEdge, idle_prefix, schedule_delay_edge},
     fanout::{Pin, ReverseDependencies, StoragePins},
     nor_inputs::PackedNorInputs,
 };
@@ -93,6 +93,13 @@ impl LatchDelays {
         let event = schedule_delay_edge(route.stages, edge, u64::MAX)
             .expect("遅延鎖の到着時刻は現在の時刻区間に収まる");
         pending.push(Reverse((event.output_tick, route.output, event.value)));
+    }
+
+    fn advance_idle(&mut self, limit: u64) -> u64 {
+        let next = self.pending.peek().map(|&Reverse((tick, _, _))| tick);
+        let span = idle_prefix(self.tick, Self::REBASE_TICK, next, limit);
+        self.tick += span;
+        span
     }
 
     fn due(&mut self, changes: &mut Vec<(usize, bool)>) {
@@ -362,6 +369,25 @@ impl EventVm {
         self.step_with_evaluation(input, |_| {})
     }
 
+    /// 評価候補と末尾の更新予定がない範囲で、同じ外部入力の tick をまとめて進める。
+    ///
+    /// 進めた tick 数を返す。入力が変わる場合、幅が合わない場合、または
+    /// ラッチ鎖の予定を使わない実行器では0を返す。進めた間は公開出力と
+    /// RAM が現在の値を保ち、直近の評価数も0になる。
+    pub fn advance_idle(&mut self, input: &[bool], limit: u64) -> u64 {
+        if self.queue.pending_count() != 0 || input != &self.nor.read_only()[..self.external] {
+            return 0;
+        }
+        let Some(delays) = &mut self.delays else {
+            return 0;
+        };
+        let span = delays.advance_idle(limit);
+        if span != 0 {
+            self.evaluated = 0;
+        }
+        span
+    }
+
     /// 1 tick 進め、評価する素子の添字を評価順に通知する。
     ///
     /// 添字は NOR を先に並べ、その後に状態素子を並べる。
@@ -435,9 +461,17 @@ impl EventVm {
             .users
             .readers(slot)
             .expect("値の列と逆引き表は同じ配線番号を使う");
-        self.queue.insert_all(nodes);
-        if let Some(delays) = &mut self.delays {
+        if let Some(delays) = self.delays.as_mut().filter(|delays| delays.source_rows[slot] != 0) {
+            let gates = self.nor.gate_count();
+            for &node in nodes {
+                // 遅延鎖の先頭への通知は、評価キューに入れず末尾の予定へ反映する。
+                if node < gates || !delays.eliminated[node - gates] {
+                    self.queue.insert(node);
+                }
+            }
             delays.notify(slot, value, slot < self.external);
+        } else {
+            self.queue.insert_all(nodes);
         }
         for &target in outputs {
             self.output[target] = value;

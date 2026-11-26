@@ -105,6 +105,19 @@ impl Machine {
         Ok(output[192])
     }
 
+    fn advance_ack_idle(&mut self, rx: bool, limit: usize) -> usize {
+        let output = self.event.output();
+        if self.tick < STANDARD_TICKS || self.frame[0] != rx
+            || output[193] || output[194] || output[195] || output[196]
+        {
+            return 0;
+        }
+        let span = self.event.advance_idle(&self.frame, (limit as u64).min(self.limit - self.tick));
+        self.tick += span;
+        self.stable += span;
+        span as usize
+    }
+
     fn storage_index(&self, address_bits: usize) -> Result<usize, Box<dyn Error>> {
         let mut matches = (0..self.reference.storage_count()).filter(|&index| {
             self.reference
@@ -191,6 +204,7 @@ struct PhaseMetrics {
     ticks_without_other_evaluations: u64,
     commit_ticks: u64,
     write_ticks: u64,
+    idle_ticks: u64,
 }
 
 impl PhaseMetrics {
@@ -221,6 +235,9 @@ impl PhaseMetrics {
             self.commit_ticks,
             self.write_ticks,
         );
+        if self.idle_ticks != 0 {
+            println!("  評価せずまとめて進めた tick {}", self.idle_ticks);
+        }
         if self.ticks != 0 {
             let seconds = self.elapsed.as_secs_f64();
             println!(
@@ -246,6 +263,7 @@ fn flash(
     machine: &mut Machine,
     words: &[[u8; 8]],
     mut metrics: Option<&mut TransferMetrics>,
+    batch_idle: bool,
 ) -> Result<(), Box<dyn Error>> {
     let program = machine.storage_index(15)?;
     let tail = machine.storage_index(10)?;
@@ -270,7 +288,18 @@ fn flash(
         let start = machine.tick;
         let started = metrics.as_ref().map(|_| Instant::now());
         let mut waveform_end = None;
-        let acknowledged = uart::send(bytes, |rx| -> Result<bool, Box<dyn Error>> {
+        let acknowledged = uart::send_with_idle(bytes, |rx, limit| -> Result<_, Box<dyn Error>> {
+            if batch_idle && limit > 1 {
+                let span = machine.advance_ack_idle(rx, limit);
+                if span != 0 {
+                    if let Some(metrics) = &mut metrics {
+                        metrics.ack.ticks += span as u64;
+                        metrics.ack.ticks_without_other_evaluations += span as u64;
+                        metrics.ack.idle_ticks += span as u64;
+                    }
+                    return Ok((machine.event.output()[192], span));
+                }
+            }
             let ready = match metrics.as_deref_mut() {
                 Some(metrics) => {
                     let mut chain_evaluations = 0;
@@ -305,7 +334,7 @@ fn flash(
             if machine.event.output()[194] && machine.pc() >= ENTRY {
                 return Err("転送中にアプリの命令が退役した。".into());
             }
-            Ok(ready)
+            Ok((ready, 1))
         })
         .map_err(|cause| format!("UART 転送語 {index}: {cause}"))?;
         if let (Some(metrics), Some(started), Some(end)) = (&mut metrics, started, waveform_end) {
@@ -482,6 +511,7 @@ fn measure_transfer(
     count: usize,
     shared_input: bool,
     latch_delays: bool,
+    batch_idle: bool,
 ) -> Result<(), Box<dyn Error>> {
     let image = fs::read(image)?;
     let words = image_words(&image)?;
@@ -512,7 +542,7 @@ fn measure_transfer(
     };
     let started = Instant::now();
     // ヘッダーには元の全語数を残し、最初の count 語の ACK と RAM を同じ経路で調べる。
-    flash(&mut machine, &words[..=count], Some(&mut metrics))?;
+    flash(&mut machine, &words[..=count], Some(&mut metrics), batch_idle)?;
     let elapsed = started.elapsed();
     println!(
         "転送先頭 {count} 語、構築 {:.3}s、転送・照合 {:.3}s",
@@ -592,7 +622,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if let [project, image, flag, count] = args.as_slice()
         && (flag == "--measure-transfer" || flag == "--measure-transfer-shared"
-            || flag == "--measure-transfer-delays")
+            || flag == "--measure-transfer-delays" || flag == "--measure-transfer-idle")
     {
         let count = count
             .to_str()
@@ -603,7 +633,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             Path::new(image),
             count,
             flag == "--measure-transfer-shared",
-            flag == "--measure-transfer-delays",
+            flag == "--measure-transfer-delays" || flag == "--measure-transfer-idle",
+            flag == "--measure-transfer-idle",
         );
     }
     let (project, image, log, expected, limit) = match args.as_slice() {
@@ -631,6 +662,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let words = image_words(&image)?;
     let reference = reference_pcs(Path::new(log))?;
     let mut machine = Machine::new(uart::machine(Path::new(project))?, limit, false)?;
-    flash(&mut machine, words, None)?;
+    flash(&mut machine, words, None, false)?;
     verify_execution(&mut machine, &reference, expected)
 }

@@ -131,18 +131,44 @@ pub fn waveform(bytes: [u8; 8]) -> impl Iterator<Item = bool> {
     })
 }
 
-/// 受信語の有効性が立ってから消費されるまで、RX をアイドルに保つ。
-pub fn send<E>(bytes: [u8; 8], mut tick: impl FnMut(bool) -> Result<bool, E>) -> Result<bool, E> {
+/// 波形は1 tick ずつ送り、ACK 待ちでは同じ有効フラグが続く区間をまとめる。
+///
+/// コールバックは有効フラグと実行した tick 数を返す。tick 数は1から渡した
+/// 上限までで、その区間の各 tick で有効フラグが同じであることを呼び出し側が確認する。
+/// 前に観測した有効フラグが true で、その後 false になった場合は、その tick だけ進める。
+///
+/// # Errors
+///
+/// コールバックのエラーをそのまま返す。
+///
+/// # Panics
+///
+/// コールバックが上限外の tick 数を返した場合や、消費を検出した呼び出しで
+/// 2 tick 以上進めた場合にパニックする。
+#[allow(dead_code)]
+pub fn send_with_idle<E>(
+    bytes: [u8; 8],
+    mut tick: impl FnMut(bool, usize) -> Result<(bool, usize), E>,
+) -> Result<bool, E> {
     let mut ready = false;
     for level in waveform(bytes) {
-        ready |= tick(level)?;
+        let (latest, span) = tick(level, 1)?;
+        assert_eq!(span, 1);
+        ready |= latest;
     }
-    for _ in 0..20_000 {
-        let latest = tick(true)?;
+    const ACK_TICKS: usize = 20_000;
+    let mut remaining = ACK_TICKS;
+    while remaining != 0 {
+        // 波形中に有効フラグが立って下がった場合も、最初の待ち tick で消費を検出する。
+        let limit = if remaining == ACK_TICKS { 1 } else { remaining };
+        let (latest, span) = tick(true, limit)?;
+        assert!((1..=limit).contains(&span));
         if ready && !latest {
+            assert_eq!(span, 1);
             return Ok(true);
         }
         ready |= latest;
+        remaining -= span;
     }
     Ok(false)
 }
