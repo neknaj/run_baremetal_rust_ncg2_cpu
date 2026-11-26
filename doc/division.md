@@ -120,4 +120,14 @@ python3 tools/verify_division_qemu.py "$work/division.elf" "$work/qemu.log" \
 python3 tools/elf_image.py "$work/division.elf" "$work/uart.bin" --format uart-boot
 ```
 
-`uart.bin` と QEMU の参照ログ、結果2語のファイルは `verify_uart_selfhost` の `--circuit-loader` と `--result-file` に渡せる。
+`uart.bin` と QEMU の参照ログ、結果2語のファイルを使い、NCG2 の回路で同じプログラムを実行する。
+
+```sh
+host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
+  --target "$host" --example verify_uart_selfhost -- \
+  --circuit-loader uart-circuit-loader.toml "$work/uart.bin" "$work/qemu.log" \
+  --result-file "$work/result.bin" 3000000
+```
+
+Windows の release ビルドでは、UART で送った78語が転送後の RAM と一致した。CPU へ引き渡してから954,177 tick でプログラムが停止し、退役 PC 230件と終了時の状態1・件数22が QEMU と一致した。
