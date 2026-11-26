@@ -93,10 +93,9 @@ pub open spec fn multiply_running_timing(
     finished: spec_fn(int) -> bool,
     running: spec_fn(int) -> bool,
 ) -> bool {
-    forall|t: int| t >= 11 ==> #[trigger] running(t) == if start(t - 11) || finished(t - 3) {
-        start(t - 11)
-    } else {
-        running(t - 1)
+    forall|t: int| t >= 3 ==> #[trigger] running(t) == {
+        let set = t >= 11 && start(t - 11);
+        if set || finished(t - 3) { set } else { running(t - 1) }
     }
 }
 
@@ -527,6 +526,54 @@ pub open spec fn multiplier_window_ready(
     &&& forall|t: int| i + 1024 <= t <= i + 1032 ==> !(#[trigger] running(t))
 }
 
+/// リセット時の初期値と起動用パルスから、最初の命令枠が tick 4 に開くことを示す。
+pub proof fn first_issue_after_reset(
+    seed: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+)
+    requires
+        !seed(0), seed(1), !commit(0),
+        forall|t: int| t <= 2 ==> !(#[trigger] issue(t)),
+        forall|t: int| t >= 3 ==> #[trigger] issue(t) == (seed(t - 3) || commit(t - 3)),
+    ensures issue(4), forall|t: int| t < 4 ==> !(#[trigger] issue(t)),
+{
+    assert(!issue(3));
+}
+
+/// リセット後の最初の命令枠では、前の命令に由来する乗算状態が残っていない。
+pub proof fn first_multiplier_window_ready_after_reset(
+    seed: spec_fn(int) -> bool,
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+)
+    requires
+        !seed(0), seed(1), !commit(0),
+        forall|t: int| t <= 2 ==> !(#[trigger] issue(t)),
+        forall|t: int| t >= 3 ==> #[trigger] issue(t) == (seed(t - 3) || commit(t - 3)),
+        forall|t: int| #[trigger] start(t) ==> issue(t - 1027),
+        multiply_control(start, capture, done, finished),
+        multiply_running_timing(start, finished, running),
+        forall|t: int| t <= 0 ==> !(#[trigger] capture(t)),
+        forall|t: int| t <= 0 ==> !(#[trigger] done(t)),
+        forall|t: int| t <= 2 ==> !(#[trigger] running(t)),
+    ensures issue(4), multiplier_window_ready(capture, finished, running, issue, 4),
+{
+    first_issue_after_reset(seed, issue, commit);
+    assert forall|t: int| t < 1031 implies !(#[trigger] start(t)) by {
+        assert(!issue(t - 1027));
+    }
+    reset_multiply_has_no_pending_captures(start, capture, done, finished, 1033);
+    assert forall|t: int| 1028 <= t <= 1036 implies !(#[trigger] running(t)) by {
+        idle_running_holds(start, finished, running, 2, t);
+    }
+}
+
 /// 乗算の命令枠が開いた後、最初の完了通知が次の枠に届くまでは issue が再発しない。
 pub proof fn multiply_window_rejects_early_issue(
     start: spec_fn(int) -> bool,
@@ -757,15 +804,17 @@ proof fn idle_running_holds(
 )
     requires
         multiply_running_timing(start, finished, running),
-        11 <= from <= until,
+        2 <= from <= until,
         !running(from),
-        forall|t: int| from < t <= until ==> !(#[trigger] start(t - 11)),
+        forall|t: int| t >= 11 && from < t <= until ==> !(#[trigger] start(t - 11)),
     ensures !running(until),
     decreases until - from,
 {
     if from < until {
         idle_running_holds(start, finished, running, from, until - 1);
-        assert(!start(until - 11));
+        if until >= 11 {
+            assert(!start(until - 11));
+        }
     }
 }
 
