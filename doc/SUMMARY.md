@@ -22,6 +22,7 @@
 - [整数 ALU](integer-alu.md)
   - [MUL 回路](multiply.md)
   - [符号なし128ビット乗算](multiply-wide.md)
+  - [整数除算の演算回路](division.md)
 - [部分読み出しと部分書き込み](subword-memory.md)
 
 # NCG2 Core のセルフホスト
