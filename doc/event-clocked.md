@@ -46,6 +46,8 @@ Core の配線を実行器の添字に変換する処理、評価対象外の素
 
 ## 連続入力のラッチの変更ビットをまとめて調べる
 
+試作を無効にするには、対応する `NCG2_BENCH_*` 環境変数を外す。実行器は値にかかわらず、変数が設定されていれば試作を有効にする。
+
 `NCG2_BENCH_LATCH_LANES=1` を付けて `verify_uart_selfhost` を実行すると、非 RAM のラッチのうち、9ビット以上で先頭以外の配線が連続するものを8ビットずつ比較する。各ブロックの変更をビットマスクにし、値が変わった出力だけを添字順に確定候補へ追加する。先頭の任意配線と末尾の端数も同じ旧状態から読む。
 
 連続配線の添字と変更マスクは Verus で検証した。実行器で出力範囲を取り出して確定候補に追加する処理は、64ビットのシフトラッチを使い、標準 VM と全 tick を照合した。全量の UART 計測では、この経路で受信した語を物理 RAM から照合した。[計測の記録](https://github.com/neknaj/run_baremetal_rust_ncg2_cpu/wiki/UART-performance)
@@ -60,10 +62,11 @@ Verus のワード演算の契約は、幅以内の各ビットの次の値と�
 
 ## UART を経由したアプリ実行の区間計測
 
-同じ転送データを使い、転送と RAM の照合が済んだ後の区間を測る。次の例では先頭512命令の退役 PC を順に QEMU と照合する。tick 上限は転送開始から数える。必要な転送データとログは[セルフホストの手順](selfhost.md)で生成できる。
+同じ転送データを使い、転送と RAM の照合が済んだ後の区間を測る。次の例では先頭512命令の退役 PC を順に QEMU と照合する。tick 上限は転送開始から数える。必要な転送データとログは[セルフホストの手順](selfhost.md#回路ソースと入力を指定する)で生成できる。
 
 ```bash
-cargo run --release --manifest-path verification/Cargo.toml \
+host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml --target "$host" \
   --example verify_uart_selfhost -- \
   --measure-circuit-execution uart-circuit-loader.toml \
   "$work/uart.bin" "$work/qemu.log" 512 120000000
