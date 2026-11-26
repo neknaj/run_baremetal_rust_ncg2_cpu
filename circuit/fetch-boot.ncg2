@@ -1,0 +1,73 @@
+(namespace rv64
+  (export fetch-boot)
+
+  ;; 各段は入力を二分し、左右どちらかに1があるときだけ1を返す。
+  (func any-bit-2 (in (bits-in (bits 2))) (out nonzero)
+    (def left (bit bits-in 0))
+    (def right (bit bits-in 1))
+    (def zero (nor left right))
+    (def nonzero (nor zero zero)))
+
+  (func any-bit-4 (in (bits-in (bits 4))) (out nonzero)
+    (def left (slice bits-in 0 2))
+    (def right (slice bits-in 2 2))
+    (def left-set (any-bit-2 left))
+    (def right-set (any-bit-2 right))
+    (def zero (nor left-set right-set))
+    (def nonzero (nor zero zero)))
+
+  (func any-bit-8 (in (bits-in (bits 8))) (out nonzero)
+    (def left (slice bits-in 0 4))
+    (def right (slice bits-in 4 4))
+    (def left-set (any-bit-4 left))
+    (def right-set (any-bit-4 right))
+    (def zero (nor left-set right-set))
+    (def nonzero (nor zero zero)))
+
+  (func any-bit-16 (in (bits-in (bits 16))) (out nonzero)
+    (def left (slice bits-in 0 8))
+    (def right (slice bits-in 8 8))
+    (def left-set (any-bit-8 left))
+    (def right-set (any-bit-8 right))
+    (def zero (nor left-set right-set))
+    (def nonzero (nor zero zero)))
+
+  (func any-bit-32 (in (bits-in (bits 32))) (out nonzero)
+    (def left (slice bits-in 0 16))
+    (def right (slice bits-in 16 16))
+    (def left-set (any-bit-16 left))
+    (def right-set (any-bit-16 right))
+    (def zero (nor left-set right-set))
+    (def nonzero (nor zero zero)))
+
+  (func any-bit-64 (in (bits-in (bits 64))) (out nonzero)
+    (def left (slice bits-in 0 32))
+    (def right (slice bits-in 32 32))
+    (def left-set (any-bit-32 left))
+    (def right-set (any-bit-32 right))
+    (def zero (nor left-set right-set))
+    (def nonzero (nor zero zero)))
+
+  ;; 起動アドレス 0x10000 からのバイト位置で命令を読む。
+  ;; 4バイト境界にある先頭6命令だけが有効。他の位置では両出力を0にする。
+  (func fetch-boot
+    (in (pc-offset (bits 64)))
+    (out (instruction (bits 32)) valid)
+    ;; 下位2ビットが整列を、ビット5～63が ROM の8語分の範囲に収まることを決める。
+    (def alignment-bits (slice pc-offset 0 2))
+    (def high-bits (slice pc-offset 5 59))
+    (def padding #b000)
+    (def checked-bits (concat alignment-bits high-bits padding))
+    (def invalid (any-bit-64 checked-bits))
+
+    ;; 有効なオフセットではビット2～4を保つ。検査に失敗したら上位2ビットを立て、
+    ;; 両出力が0になる ROM の添字6または7を選ぶ。
+    (def word-0 (bit pc-offset 2))
+    (def word-1 (bit pc-offset 3))
+    (def word-2 (bit pc-offset 4))
+    (def clear-address-1 (nor word-1 invalid))
+    (def clear-address-2 (nor word-2 invalid))
+    (def address-1 (nor clear-address-1 clear-address-1))
+    (def address-2 (nor clear-address-2 clear-address-2))
+    (def address (concat word-0 address-1 address-2))
+    (def (instruction valid) (boot-rom address))))
