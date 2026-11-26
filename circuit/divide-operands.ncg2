@@ -1,0 +1,72 @@
+(namespace rv64::arithmetic
+  (export divide-prepare divide-result)
+
+  ;; W では入力の下位32ビットのみを使う。上位32ビットは符号付きなら符号ビット、符号なしなら0で埋める。
+  (func divide-extend
+    (in (value (bits 64)) signed-mode word-mode)
+    (out (extended (bits 64)))
+    (def low (slice value 0 32))
+    (def high (slice value 32 32))
+    (def word-sign (bit low 31))
+    (def extension (select-bit signed-mode 0 word-sign))
+    (def fill-2 (concat extension extension))
+    (def fill-4 (concat fill-2 fill-2))
+    (def fill-8 (concat fill-4 fill-4))
+    (def fill-16 (concat fill-8 fill-8))
+    (def fill-32 (concat fill-16 fill-16))
+    (def upper (select-32 word-mode high fill-32))
+    (def extended (concat low upper)))
+
+  (func divide-negate-if
+    (in negative (value (bits 64)))
+    (out (result (bits 64)))
+    (def inverted (xor value #xffffffffffffffff))
+    (def (_carry opposite) (add-64 inverted #x0000000000000000 1))
+    (def result (select negative value opposite)))
+
+  ;; 符号付き入力は絶対値に変換する。64ビット最小値の絶対値も符号なしの64ビットで表せる。
+  (func divide-prepare
+    (in (dividend (bits 64)) (divisor (bits 64)) signed-mode word-mode)
+    (out (dividend-magnitude (bits 64)) (divisor-magnitude (bits 64)))
+    (def left (divide-extend dividend signed-mode word-mode))
+    (def right (divide-extend divisor signed-mode word-mode))
+    (def left-sign (bit left 63))
+    (def right-sign (bit right 63))
+    (def left-negative (select-bit signed-mode 0 left-sign))
+    (def right-negative (select-bit signed-mode 0 right-sign))
+    (def dividend-magnitude (divide-negate-if left-negative left))
+    (def divisor-magnitude (divide-negate-if right-negative right)))
+
+  ;; 除算器が求めた絶対値に符号を戻す。商は両オペランドの符号が異なるとき負になり、
+  ;; 余りには被除数の符号を使う。例外結果は演算幅を決めた後の入力から選ぶ。
+  (func divide-result
+    (in (dividend (bits 64)) (divisor (bits 64)) (quotient-magnitude (bits 64))
+        (remainder-magnitude (bits 64)) signed-mode word-mode)
+    (out (quotient (bits 64)) (remainder (bits 64)))
+    (def left (divide-extend dividend signed-mode word-mode))
+    (def right (divide-extend divisor signed-mode word-mode))
+    (def left-sign (bit left 63))
+    (def right-sign (bit right 63))
+    (def right-nonnegative (nor right-sign right-sign))
+    (def different-sign (select-bit left-sign right-sign right-nonnegative))
+    (def quotient-negative (select-bit signed-mode 0 different-sign))
+    (def remainder-negative (select-bit signed-mode 0 left-sign))
+    (def signed-quotient (divide-negate-if quotient-negative quotient-magnitude))
+    (def signed-remainder (divide-negate-if remainder-negative remainder-magnitude))
+
+    (def zero #x0000000000000000)
+    (def minus-one #xffffffffffffffff)
+    (def minimum (select word-mode #x8000000000000000 #xffffffff80000000))
+    (def (by-zero _below-zero) (compare-unsigned right zero))
+    (def (by-minus-one _below-minus-one) (compare-unsigned right minus-one))
+    (def (at-minimum _below-minimum) (compare-unsigned left minimum))
+    (def overflows-if-signed (select-bit at-minimum 0 by-minus-one))
+    (def overflow (select-bit signed-mode 0 overflows-if-signed))
+    (def quotient-or-minimum (select overflow signed-quotient left))
+    (def remainder-or-zero (select overflow signed-remainder zero))
+    (def raw-quotient (select by-zero quotient-or-minimum minus-one))
+    (def raw-remainder (select by-zero remainder-or-zero left))
+
+    ;; W の結果は符号なし演算でもビット31から符号拡張する。
+    (def quotient (divide-extend raw-quotient 1 word-mode))
+    (def remainder (divide-extend raw-remainder 1 word-mode))))

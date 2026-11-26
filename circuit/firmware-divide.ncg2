@@ -1,0 +1,42 @@
+(namespace rv64
+  (export firmware-divide)
+
+  (latch firmware-divide-word (width 64))
+  (latch firmware-divide-mode (width 1))
+
+  ;; 開始要求と同じ tick にオペランドを取り込み、補正回路が確定してから初期化する。
+  ;; 前の要求が完了してから次の1 tick の start を渡す。
+  (module firmware-divide
+    (in start (left (bits 64)) (right (bits 64)) signed-mode word-mode remainder-mode)
+    (out (result (bits 64)) finished)
+    (def dividend (firmware-divide-word left start))
+    (def divisor (firmware-divide-word right start))
+    (def signed-input (firmware-divide-mode signed-mode start))
+    (def word-input (firmware-divide-mode word-mode start))
+    (def remainder-input (firmware-divide-mode remainder-mode start))
+    (def (dividend-magnitude divisor-magnitude)
+      (::rv64::arithmetic::divide-prepare dividend divisor signed-input word-input))
+    (def (quotient remainder)
+      (::rv64::arithmetic::divide-result dividend divisor quotient-magnitude remainder-magnitude
+                                          signed-input word-input))
+    (def result (::rv64::arithmetic::select remainder-input quotient remainder))
+
+    (def armed (delay-2 1))
+    (def first (delay-512 start))
+    (def initialized (delay-8 first))
+    (def running (phase-mode initialized finished))
+    (def initialize (nor running running))
+    (def no-done (nor done done))
+    (def not-yet (execute-and running no-done))
+    (def request (delay-512 capture))
+    (def repeat (accept-pulse request not-yet))
+    (def either (execute-or first repeat))
+    (def capture (phase-bit either armed))
+    (def (quotient-magnitude remainder-magnitude done)
+      (::rv64::arithmetic::div-wide dividend-magnitude divisor-magnitude initialize capture))
+    (def older-done (delay-2 done))
+    (def rising (nor no-done older-done))
+
+    ;; 64回目の捕捉で商と余りが出てから、符号補正と結果選択が確定するまで待つ。
+    (def corrected (delay-512 rising))
+    (def finished (accept-pulse corrected running))))

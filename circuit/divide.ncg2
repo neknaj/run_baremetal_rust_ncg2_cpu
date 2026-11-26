@@ -1,0 +1,66 @@
+(namespace rv64::arithmetic
+  (export div-round div-wide)
+
+  (latch div-word (width 64))
+  (latch div-flag (width 1))
+
+  ;; 被除数の次のビットを上位桁から順に受け取り、余りと商の1ビットを求める。
+  ;; 試行値は65ビット。下位64ビットの減算で借りが出ても、上位桁が1なら減算を採用する。
+  (func div-round
+    (in (remainder (bits 64)) (divisor (bits 64)) next-bit)
+    (out (next-remainder (bits 64)) quotient-bit)
+    (def remainder-low (slice remainder 0 63))
+    (def trial-low (concat next-bit remainder-low))
+    (def trial-high (bit remainder 63))
+    (def inverted-divisor (xor divisor #xffffffffffffffff))
+    (def (no-borrow difference) (add-64 trial-low inverted-divisor 1))
+    (def has-borrow (nor trial-high no-borrow))
+    (def quotient-bit (nor has-borrow has-borrow))
+    (def next-remainder (select quotient-bit trial-low difference)))
+
+  ;; 初期化で被除数を取り込み、上位から1ビットずつ消費する。
+  ;; 空いた下位ビットへ商を取り込み、64回後に被除数の全域を商で置き換える。
+  (func div-wide-next
+    (in (dividend (bits 64)) (input-divisor (bits 64)) initialize
+        (quotient (bits 64)) (remainder (bits 64)) (divisor (bits 64))
+        (mark (bits 64)) running done)
+    (out (next-quotient (bits 64)) (next-remainder (bits 64)) (next-divisor (bits 64))
+         (next-mark (bits 64)) next-running next-done)
+    (def zero #x0000000000000000)
+    (def first-mark #x0000000000000001)
+    (def input-bit (bit quotient 63))
+    (def (round-remainder quotient-bit) (div-round remainder divisor input-bit))
+    (def lower (slice quotient 0 63))
+    (def round-quotient (concat quotient-bit lower))
+    (def low-mark (slice mark 0 63))
+    (def round-mark (concat 0 low-mark))
+    (def running-quotient (select running quotient round-quotient))
+    (def running-remainder (select running remainder round-remainder))
+    (def running-mark (select running mark round-mark))
+    (def next-quotient (select initialize running-quotient dividend))
+    (def next-remainder (select initialize running-remainder zero))
+    (def next-divisor (select initialize divisor input-divisor))
+    (def next-mark (select initialize running-mark first-mark))
+    (def last (bit mark 63))
+    (def not-running (nor running running))
+    (def not-last (nor last last))
+    (def run-on (nor not-running last))
+    (def stop-next (nor initialize run-on))
+    (def next-running (nor stop-next stop-next))
+    (def finishes (nor not-running not-last))
+    (def not-done-next (nor done finishes))
+    (def next-done (nor initialize not-done-next)))
+
+  ;; 初期化と各反復は、組み合わせ回路が確定した後の capture で取り込む。
+  ;; done で結果を保持し、新しい initialize で次の除算を受け付ける。
+  (module div-wide
+    (in (dividend (bits 64)) (input-divisor (bits 64)) initialize capture)
+    (out (quotient (bits 64)) (remainder (bits 64)) done)
+    (def (next-quotient next-remainder next-divisor next-mark next-running next-done)
+      (div-wide-next dividend input-divisor initialize quotient remainder divisor mark running done))
+    (def quotient (div-word next-quotient capture))
+    (def remainder (div-word next-remainder capture))
+    (def divisor (div-word next-divisor capture))
+    (def mark (div-word next-mark capture))
+    (def running (div-flag next-running capture))
+    (def done (div-flag next-done capture))))

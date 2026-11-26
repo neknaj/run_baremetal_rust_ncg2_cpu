@@ -4,7 +4,7 @@ use circuitgame2_core::netlist::{NorNetlist, Wire};
 
 use super::{name, vector};
 
-/// 命令、フェッチの成否、オペランド、メモリと乗算の結果を独立した入力として比較する。
+/// 命令、フェッチの成否、オペランド、メモリの読出し値、乗除算の結果を独立した入力として扱う。
 pub(super) fn emit_dispatch(outputs: &[Wire], core_profile: bool, uart_profile: bool) {
     println!("(define-fun core-profile () Bool {core_profile})");
     println!("(define-fun uart-profile () Bool {uart_profile})");
@@ -14,7 +14,7 @@ pub(super) fn emit_dispatch(outputs: &[Wire], core_profile: bool, uart_profile: 
         ("rs1", 96, 160),
         ("rs2", 160, 224),
         ("loaded-data", 224, 288),
-        ("product", 288, 352),
+        ("long-result", 288, 352),
         ("probe", 353, 417),
     ] {
         let bits = vector((start..stop).map(|i| format!("i{i}")));
@@ -27,6 +27,10 @@ pub(super) fn emit_dispatch(outputs: &[Wire], core_profile: bool, uart_profile: 
         ("register-write", 135),
         ("memory-write", 264),
         ("high-product", 265),
+        ("divide", 266),
+        ("signed-mode", 267),
+        ("word-mode", 268),
+        ("remainder-mode", 269),
     ] {
         println!("(define-fun {port} () Bool {})", name(outputs[bit]));
     }

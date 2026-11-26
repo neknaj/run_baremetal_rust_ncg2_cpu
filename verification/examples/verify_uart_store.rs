@@ -312,13 +312,15 @@ fn verify_instruction_controls(
     }
 
     let (retire_latch, _) = latch(vm, retire, 1)?;
-    let [simple, mul_finished] =
+    let [simple, long_finished] =
         or_inputs(net, retire_latch.data[0]).ok_or("退役要求が OR でない。")?;
+    let [mul_finished, div_finished] =
+        or_inputs(net, long_finished).ok_or("乗算と除算の完了通知が OR でない。")?;
     if delay_source(vm, retire_latch.enable, 2)? != Wire::Constant(true) {
         return Err("退役ラッチの初期化時刻が異なる。".into());
     }
     let (simple_latch, _) = latch(vm, simple, 1)?;
-    let [ready, not_multiply] =
+    let [ready, simple_operation] =
         and_inputs(net, simple_latch.data[0]).ok_or("通常退役要求が AND でない。")?;
     if delay_source(vm, simple_latch.enable, 4)? != Wire::Constant(true)
         || delay_source(vm, ready, 1024)? != issue
@@ -367,28 +369,54 @@ fn verify_instruction_controls(
     let multiply = and_inputs(net, mul_request)
         .and_then(|inputs| other_input(inputs, valid))
         .ok_or("乗算の開始要求が commit と同じ命令有効信号を使っていない。")?;
-    if delay_source(vm, start_latch.enable, 4)? != Wire::Constant(true)
-        || inverted_input(net, not_multiply) != Some(multiply)
+    let divide = nor_inputs(net, simple_operation)
+        .and_then(|inputs| other_input(inputs, multiply))
+        .ok_or("通常退役は乗算・除算の判定を参照する必要がある。")?;
+    if delay_source(vm, start_latch.enable, 4)? != Wire::Constant(true) {
+        return Err("乗算の開始ラッチの初期化時刻が異なる。".into());
+    }
+    // 除算の開始も同じ命令枠と有効信号を使い、補正結果が安定してから完了を通知する。
+    let (div_completion, _) = latch(vm, div_finished, 1)?;
+    let [corrected, div_running] =
+        and_inputs(net, div_completion.data[0]).ok_or("除算の完了通知が AND でない。")?;
+    let div_rising = delay_source(vm, corrected, 512)?;
+    let [div_no_done, div_older_done] =
+        nor_inputs(net, div_rising).ok_or("除算完了の立ち上がりが NOR でない。")?;
+    let div_done = inverted_input(net, div_no_done).ok_or("除算完了の反転がない。")?;
+    let (div_run, _) = latch(vm, div_running, 1)?;
+    let div_initialized = delay_source(vm, div_run.data[0], 2)?;
+    let div_first = delay_source(vm, div_initialized, 8)?;
+    let div_start = delay_source(vm, div_first, 512)?;
+    let (div_start_latch, _) = latch(vm, div_start, 1)?;
+    let div_request = and_inputs(net, div_start_latch.data[0])
+        .and_then(|inputs| other_input(inputs, ready))
+        .ok_or("除算は同じ ready を使う必要がある。")?;
+    if delay_source(vm, div_older_done, 2)? != div_done
+        || delay_source(vm, div_completion.enable, 4)? != Wire::Constant(true)
+        || or_inputs(net, div_run.enable).and_then(|inputs| other_input(inputs, div_finished))
+            != Some(div_initialized)
+        || and_inputs(net, div_request).and_then(|inputs| other_input(inputs, valid)) != Some(divide)
+        || delay_source(vm, div_start_latch.enable, 4)? != Wire::Constant(true)
     {
-        return Err("通常退役と乗算で命令の種類を決める信号が一致しない。".into());
+        return Err("除算の開始または完了の配線が異なる。".into());
     }
     // 2経路の NOR 段数が違うため、同じ命令種別信号を異なる tick に読む。
     // ready が届く前に信号が確定するよう、取り込み済みの命令だけに依存することを調べる。
-    let multiply_cone = depths(net, &[multiply], &net.outputs[128..192])?;
-    if multiply_cone.read_depth.is_some()
-        || multiply_cone
+    let operation_cone = depths(net, &[multiply, divide], &net.outputs[128..192])?;
+    if operation_cone.read_depth.is_some()
+        || operation_cone
             .inputs
             .iter()
             .enumerate()
             .any(|(index, depth)| depth.is_some() && !instruction_range.contains(&index))
     {
-        return Err("乗算の判定が取り込み済みの命令以外に依存する。".into());
+        return Err("乗算・除算の判定が取り込み済みの命令以外に依存する。".into());
     }
     require_bound(
-        &multiply_cone,
+        &operation_cone,
         instruction_range.clone(),
         14,
-        "命令から乗算の判定",
+        "命令から乗算・除算の判定",
     )?;
 
     // 乗算中に RAM のデータ応答や積が変わっても、退役の有効性は保持値だけで決まる。
