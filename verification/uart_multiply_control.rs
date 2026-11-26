@@ -499,6 +499,124 @@ pub open spec fn cpu_multiply_start_path(
     &&& forall|t: int| #[trigger] commit(t) ==> simple(t - 6) || finished(t - 6)
 }
 
+/// 通常完了には1,027 tick 前の命令開始が必要になる。
+/// 退役から命令開始へ戻る式と組み合わせるときは、対象の時刻だけ展開する。
+#[verifier::opaque]
+pub open spec fn cpu_simple_path(simple: spec_fn(int) -> bool, issue: spec_fn(int) -> bool) -> bool {
+    forall|t: int| #[trigger] simple(t) ==> issue(t - 1027)
+}
+
+proof fn simple_notification_follows_issue(simple: spec_fn(int) -> bool, issue: spec_fn(int) -> bool, at: int)
+    requires cpu_simple_path(simple, issue), simple(at),
+    ensures issue(at - 1027),
+{
+    reveal(cpu_simple_path);
+}
+
+/// 乗算の命令枠が開いた後、最初の完了通知が次の枠に届くまでは issue が再発しない。
+pub proof fn multiply_window_rejects_early_issue(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    mark: spec_fn(int, int) -> bool,
+    issue: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+    simple: spec_fn(int) -> bool,
+    i: int,
+    until: int,
+)
+    requires
+        multiply_control(start, capture, done, finished),
+        multiply_pulse_timing(start, capture, done, finished, running),
+        multiply_running_timing(start, finished, running),
+        timed_round_mark(capture, running, mark, done),
+        cpu_multiply_start_path(start, issue, commit, simple, finished),
+        cpu_simple_path(simple, issue),
+        4 <= i <= until < i + 34197,
+        start(i + 1027),
+        !simple(i + 1027),
+        forall|t: int| i - 1035 <= t < i ==> !(#[trigger] issue(t)),
+        forall|t: int| i - 8 <= t < i + 1027 ==> !(#[trigger] finished(t)),
+        forall|t: int| i + 1030 - 518 <= t < i + 1030 ==> !(#[trigger] capture(t)),
+        forall|t: int| i + 1024 <= t <= i + 1032 ==> !(#[trigger] running(t)),
+    ensures
+        forall|t: int| i < t <= until ==> !(#[trigger] issue(t)),
+    decreases until - i,
+{
+    if i < until {
+        multiply_window_rejects_early_issue(
+            start, capture, done, finished, running, mark, issue, commit, simple, i, until - 1,
+        );
+        if issue(until) {
+            let retired = until - 9;
+            let s = i + 1027;
+            assert(commit(until - 3));
+            assert(simple((until - 3) - 6) || finished((until - 3) - 6));
+            if simple(retired) {
+                simple_notification_follows_issue(simple, issue, retired);
+                assert(retired - 1027 == i);
+            }
+            if retired >= s {
+                // 退役通知の候補時刻を覆う最初の取り込みを選ぶ。
+                let round = if retired <= s + 8 { 0 } else { (retired - s - 9) / 518 + 1 };
+                assert(0 <= round <= 64);
+                assert(retired <= s + 8 + 518 * round);
+                assert(i + 518 * round < until);
+                assert forall|t: int| s < t <= s + 518 * round implies !(#[trigger] start(t)) by {
+                    assert(!issue(t - 1027));
+                }
+                isolated_multiply_reaches_round(start, capture, done, finished, running, mark, s, round);
+            }
+            assert(!finished(retired));
+        }
+    }
+}
+
+/// 通常完了と過去の完了が残っていない命令枠では、予定時刻に乗算が完了する。
+/// この間の新しい issue や乗算開始要求の不在は前提に置かず、退役の経路から導く。
+pub proof fn cpu_multiply_window_completes(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    mark: spec_fn(int, int) -> bool,
+    issue: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+    simple: spec_fn(int) -> bool,
+    i: int,
+)
+    requires
+        multiply_control(start, capture, done, finished),
+        multiply_pulse_timing(start, capture, done, finished, running),
+        multiply_running_timing(start, finished, running),
+        timed_round_mark(capture, running, mark, done),
+        cpu_multiply_start_path(start, issue, commit, simple, finished),
+        cpu_simple_path(simple, issue),
+        4 <= i,
+        start(i + 1027),
+        !simple(i + 1027),
+        forall|t: int| i - 1035 <= t < i ==> !(#[trigger] issue(t)),
+        forall|t: int| i - 8 <= t < i + 1027 ==> !(#[trigger] finished(t)),
+        forall|t: int| i + 1030 - 518 <= t < i + 1030 ==> !(#[trigger] capture(t)),
+        forall|t: int| i + 1024 <= t <= i + 1032 ==> !(#[trigger] running(t)),
+    ensures
+        forall|t: int| i < t < i + 34197 ==> !(#[trigger] issue(t)),
+        forall|t: int| i - 8 <= t < i + 34188 ==> !(#[trigger] finished(t)),
+        finished(i + 34188),
+{
+    multiply_window_rejects_early_issue(
+        start, capture, done, finished, running, mark, issue, commit, simple, i, i + 34196,
+    );
+    let s = i + 1027;
+    assert forall|t: int| s < t <= s + 518 * 64 implies !(#[trigger] start(t)) by {
+        assert(!issue(t - 1027));
+    }
+    isolated_multiply_reaches_round(start, capture, done, finished, running, mark, s, 64);
+}
+
 /// 一つの乗算の実行中に別の退役通知がなければ、次の開始までに反復は止まる。
 pub proof fn retirement_gap_clears_multiply_history(
     start: spec_fn(int) -> bool,
