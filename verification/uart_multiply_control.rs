@@ -185,6 +185,134 @@ pub proof fn round_mark_finishes_at_sixty_four(
     }
 }
 
+/// 配線検査で照合したラッチと NOR の遷移式。値は各 tick の確定後を指す。
+pub open spec fn timed_round_mark(
+    capture: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    mark: spec_fn(int, int) -> bool,
+    done: spec_fn(int) -> bool,
+) -> bool {
+    &&& forall|t: int, bit: int| t >= 5 && 0 <= bit < 64 ==> #[trigger] mark(t + 1, bit) ==
+        if capture(t) {
+            (!running(t - 5) && bit == 0)
+                || (running(t - 4) && bit > 0 && mark(t - 4, bit - 1))
+        } else {
+            mark(t, bit)
+        }
+    &&& forall|t: int| t >= 5 ==> #[trigger] done(t + 1) == if capture(t) {
+        running(t - 2) && (done(t - 2) || mark(t - 2, 63))
+    } else {
+        done(t)
+    }
+}
+
+/// 取り込みがない区間では、マークと完了フラグは次の取り込みの直前まで保たれる。
+proof fn round_state_holds(
+    capture: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    mark: spec_fn(int, int) -> bool,
+    done: spec_fn(int) -> bool,
+    from: int,
+    until: int,
+)
+    requires
+        timed_round_mark(capture, running, mark, done),
+        5 <= from <= until,
+        forall|t: int| from <= t < until ==> !(#[trigger] capture(t)),
+    ensures
+        done(until) == done(from),
+        forall|bit: int| 0 <= bit < 64 ==> #[trigger] mark(until, bit) == mark(from, bit),
+    decreases until - from,
+{
+    if from < until {
+        round_state_holds(capture, running, mark, done, from, until - 1);
+        assert(!capture(until - 1));
+        assert(done((until - 1) + 1) == done(until - 1));
+        assert forall|bit: int| 0 <= bit < 64 implies #[trigger] mark(until, bit) == mark(from, bit) by {
+            assert(mark((until - 1) + 1, bit) == mark(until - 1, bit));
+        }
+    }
+}
+
+/// 単独の開始要求から各ラウンドが時刻どおり発生し、最終回まで完了通知を出さない。
+pub proof fn isolated_multiply_reaches_round(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    mark: spec_fn(int, int) -> bool,
+    s: int,
+    round: int,
+)
+    requires
+        multiply_control(start, capture, done, finished),
+        multiply_pulse_timing(start, capture, done, finished, running),
+        multiply_running_timing(start, finished, running),
+        timed_round_mark(capture, running, mark, done),
+        2 <= s,
+        0 <= round <= 64,
+        start(s),
+        forall|t: int| s + 3 - 518 <= t < s + 3 ==> !(#[trigger] capture(t)),
+        forall|t: int| s < t <= s + 518 * round ==> !(#[trigger] start(t)),
+        forall|t: int| s - 3 <= t <= s + 5 ==> !(#[trigger] running(t)),
+    ensures
+        capture(s + 3 + 518 * round),
+        done(s + 4 + 518 * round) == (round == 64),
+        forall|t: int| s + 4 <= t <= s + 3 + 518 * round ==> !(#[trigger] done(t)),
+        forall|bit: int| 0 <= bit < 64 ==> #[trigger] mark(s + 4 + 518 * round, bit) == (bit == round),
+        forall|t: int| s <= t <= s + 8 + 518 * round ==> !(#[trigger] finished(t)),
+        round == 64 ==> finished(s + 9 + 518 * round),
+    decreases round,
+{
+    let first = s + 3;
+    let captured = first + 518 * round;
+    if round == 0 {
+        assert(capture(first));
+        assert(!running(first - 5) && !running(first - 4) && !running(first - 2));
+        assert forall|t: int| s <= t <= first + 5 implies !(#[trigger] finished(t)) by {
+            assert(!running(t - 3));
+        }
+    } else {
+        let prior = captured - 518;
+        isolated_multiply_reaches_round(start, capture, done, finished, running, mark, s, round - 1);
+        capture_follows_single_start(start, capture, done, finished, first, captured);
+        assert forall|t: int| prior < t < captured implies !(#[trigger] capture(t)) by {
+            if capture(t) {
+                let k = choose|k: int| #[trigger] round_at(first, t, k);
+                assert(round - 1 < k < round);
+            }
+        }
+        assert forall|t: int| first + 1 <= t <= captured implies !(#[trigger] done(t)) by {
+            if t > prior {
+                round_state_holds(capture, running, mark, done, prior + 1, t);
+            }
+        }
+        assert forall|t: int| s <= t <= captured + 5 implies !(#[trigger] finished(t)) by {
+            if t > prior + 5 {
+                assert(!done(t - 5));
+            }
+        }
+        unfinished_capture_causes_next_round(start, capture, done, finished, running, s, prior);
+        // マークの選択枝と完了フラグの組み合わせ経路は異なる tick の running を読む。
+        multiply_runs_until_finish_reaches_latch(start, finished, running, s, captured - 5);
+        multiply_runs_until_finish_reaches_latch(start, finished, running, s, captured - 4);
+        multiply_runs_until_finish_reaches_latch(start, finished, running, s, captured - 2);
+        round_state_holds(capture, running, mark, done, prior + 1, captured - 4);
+        round_state_holds(capture, running, mark, done, prior + 1, captured - 2);
+        assert(mark(captured - 2, 63) == (round == 64));
+        assert forall|bit: int| 0 <= bit < 64 implies #[trigger] mark(captured + 1, bit) == (bit == round) by {
+            assert(mark(captured + 1, bit) == (bit > 0 && mark(captured - 4, bit - 1)));
+        }
+        if round == 64 {
+            assert(done(captured + 1));
+            assert(!done(captured));
+            multiply_runs_until_finish_reaches_latch(start, finished, running, s, captured + 3);
+            assert(finished(captured + 6));
+        }
+    }
+}
+
 /// リセットから初回の開始要求が効く直前まで、取り込みがなく完了フラグは0のままになる。
 pub proof fn reset_multiply_has_no_pending_captures(
     start: spec_fn(int) -> bool,
