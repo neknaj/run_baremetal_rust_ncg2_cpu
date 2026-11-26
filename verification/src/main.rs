@@ -55,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | "less-than-unsigned"
         | "execute-load"
         | "execute-logic"
+        | "execute-divide"
         | "mul-round"
         | "div-round"
         | "div-wide-next"
@@ -125,6 +126,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "arithmetic.ncg2",
             "execute-boot.ncg2",
             "execute-logic.ncg2",
+        ],
+        "execute-divide" => &[
+            "decode.ncg2",
+            "arithmetic.ncg2",
+            "execute-boot.ncg2",
+            "execute-divide.ncg2",
         ],
         "mul-round" => &["decode.ncg2", "arithmetic.ncg2", "multiply.ncg2"],
         "div-round" | "div-wide-next" => &["decode.ncg2", "arithmetic.ncg2", "divide.ncg2"],
@@ -229,6 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-control" => (224, 136),
         "execute-load" => (96, 71),
         "execute-logic" => (160, 67),
+        "execute-divide" => (32, 4),
         "mul-round" => (386, 257),
         "div-round" => (129, 65),
         "div-wide-next" => (387, 258),
@@ -249,6 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-control" => Some(493),
         "execute-load" => Some(468),
         "execute-logic" => Some(31),
+        "execute-divide" => Some(14),
         "mul-round" => Some(457),
         "div-round" => Some(462),
         "div-wide-next" => Some(480),
@@ -306,6 +315,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firmware::emit_selfhost_data_map(outputs);
     } else if selected == "uart-ram-map" {
         firmware::emit_uart_ram_map(outputs);
+    } else if selected == "execute-divide" {
+        let instruction = vector((0..32).map(|index| format!("i{index}")));
+        println!("(define-fun instruction () (_ BitVec 32) {instruction})");
+        for (port, &wire) in ["recognized", "signed-mode", "word-mode", "remainder-mode"]
+            .into_iter()
+            .zip(outputs)
+        {
+            println!("(define-fun {port} () Bool {})", name(wire));
+        }
+        print!("{}", include_str!("execute_divide.smt2"));
     } else if matches!(selected, "divide-prepare" | "divide-result") {
         let prepare = selected == "divide-prepare";
         for (port, start) in [("dividend", 0), ("divisor", 64)] {
