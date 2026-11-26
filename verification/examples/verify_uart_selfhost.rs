@@ -17,11 +17,17 @@ const INFORMATION: u64 = 0x103ff8;
 const MAX_WORDS: usize = 0x8400;
 const STANDARD_TICKS: u64 = 1600;
 
+enum Loader {
+    Rom,
+    Host,
+    Circuit,
+}
+
 struct Machine {
     reference: ClockedVm,
     event: EventVm,
     frame: [bool; 194],
-    continuous: bool,
+    loader: Loader,
     bus: Option<RamWord>,
     address: [bool; 64],
     stable: u64,
@@ -30,7 +36,7 @@ struct Machine {
 }
 
 impl Machine {
-    fn new(mut reference: ClockedVm, limit: u64, continuous: bool) -> Result<Self, Box<dyn Error>> {
+    fn new(mut reference: ClockedVm, limit: u64, loader: Loader) -> Result<Self, Box<dyn Error>> {
         let mut event = EventVm::new(&reference)?;
         if event.reset() != reference.reset() {
             return Err("標準 VM と疎実行で reset の出力が異なる。".into());
@@ -39,7 +45,7 @@ impl Machine {
             reference,
             event,
             frame: [false; 194],
-            continuous,
+            loader,
             bus: None,
             address: [false; 64],
             stable: 0,
@@ -53,7 +59,7 @@ impl Machine {
     }
 
     fn step(&mut self, rx: bool) -> Result<bool, Box<dyn Error>> {
-        if !self.continuous {
+        if !matches!(self.loader, Loader::Host) {
             self.frame[0] = rx;
         }
         self.step_frame()
@@ -83,7 +89,7 @@ impl Machine {
             .into());
         }
         self.tick += 1;
-        let frame = if self.continuous { &self.frame[..] } else { &self.frame[..65] };
+        let frame = if matches!(self.loader, Loader::Host) { &self.frame[..] } else { &self.frame[..65] };
         let output = self
             .event
             .step(frame)
@@ -104,7 +110,11 @@ impl Machine {
             self.address.copy_from_slice(bus);
             self.stable = 1;
         }
-        let uart_error = !self.continuous && output[193];
+        let uart_error = match self.loader {
+            Loader::Rom => output[193],
+            Loader::Host => false,
+            Loader::Circuit => output[197],
+        };
         if uart_error || output[195] || (output[196] && self.stable < 32) {
             return Err(format!(
                 "tick {} PC={:#x}: UART エラー={}、CPU 停止={}、アドレス保持={} tick。",
@@ -244,7 +254,7 @@ fn continuous_setup(
     path: &Path, limit: u64, rate: ContinuousRate,
 ) -> Result<(Machine, ClockedVm), Box<dyn Error>> {
     let (handoff, receiver) = uart::continuous_machines(path, rate)?;
-    Ok((Machine::new(handoff, limit, true)?, receiver))
+    Ok((Machine::new(handoff, limit, Loader::Host)?, receiver))
 }
 
 fn compare_payload_word(
@@ -396,6 +406,80 @@ fn flash_continuous(
     Err(format!("tick {}: 受信 {accepted} 語、物理 RAM 確定 {confirmed} 語で転送が終了しなかった。", machine.tick).into())
 }
 
+/// 連続 RX を単一の回路へ入力し、許可から3 tick 後の RAM を転送語と照合する。
+fn flash_circuit(machine: &mut Machine, words: &[[u8; 8]], complete: bool) -> Result<(), Box<dyn Error>> {
+    let banks = (machine.storage_index(15)?, machine.storage_index(10)?);
+    let payload = &words[1..];
+    let rate = ContinuousRate::Fast;
+    let idle = uart::BIT_TICKS;
+    let waveform_ticks = (idle + words.len() * 80 * rate.bit_ticks()) as u64;
+    let waveform = std::iter::repeat_n(true, idle)
+        .chain(words.iter().copied().flat_map(|word| uart::waveform(word, rate)))
+        .chain(std::iter::repeat_n(true, 256));
+
+    let mut confirmed = 0;
+    let mut pending = None;
+    let mut last_ram_tick = 0;
+    let mut wire_elapsed = None;
+    let started = Instant::now();
+    for rx in waveform {
+        let owned = machine.step(rx)?;
+        let tick = machine.tick;
+        let output = machine.event.output();
+        if output[193] || output[194] {
+            return Err(format!("tick {tick}: RAM の引き渡し前に CPU が命令を実行した。").into());
+        }
+        if pending == Some(tick) {
+            compare_payload_word(machine, banks, confirmed, payload[confirmed])?;
+            confirmed += 1;
+            pending = None;
+            last_ram_tick = tick;
+            if confirmed % 1024 == 0 {
+                println!(
+                    "物理 RAM 確定 {confirmed}/{} 語、tick {tick}、経過 {:.3} s",
+                    payload.len(),
+                    started.elapsed().as_secs_f64(),
+                );
+            }
+        }
+        if output[196] {
+            let address = uart::word(&output[64..128]);
+            let expected = ENTRY + 8 * confirmed as u64;
+            if owned || pending.is_some() || confirmed >= payload.len() || address != expected {
+                return Err(format!(
+                    "tick {tick}: 書き込み先 {address:#x}。次に照合する語は {}、アドレスは {expected:#x}。",
+                    confirmed + 1,
+                ).into());
+            }
+            pending = Some(tick + 3);
+        }
+        if owned && (!complete || confirmed != payload.len() || pending.is_some() || last_ram_tick >= tick) {
+            return Err(format!("tick {tick}: 全語の照合を終える前に RAM が CPU に引き渡された。").into());
+        }
+        if tick == waveform_ticks {
+            wire_elapsed = Some(started.elapsed());
+        }
+        if tick >= waveform_ticks && confirmed == payload.len() && pending.is_none() && owned == complete {
+            for (index, &word) in payload.iter().enumerate() {
+                compare_payload_word(machine, banks, index, word)?;
+            }
+            let seconds = wire_elapsed.ok_or("UART の波形終了時刻がない。")?.as_secs_f64();
+            println!("UART の波形終了 {waveform_ticks} tick、8 tick/bit、経過 {seconds:.6} s");
+            println!("最後の物理 RAM 確定 {last_ram_tick} tick");
+            let elapsed = started.elapsed().as_secs_f64();
+            println!(
+                "転送と全{confirmed}語の照合を終了 {tick} tick、CPU 所有={owned}、経過 {elapsed:.6} s、平均 {:.3} µs/tick",
+                elapsed * 1_000_000.0 / tick as f64,
+            );
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "tick {}: 物理 RAM で {confirmed}/{} 語を照合したところで、転送が終了しなかった。",
+        machine.tick, payload.len(),
+    ).into())
+}
+
 fn verify_execution(
     machine: &mut Machine,
     reference: &[u64],
@@ -452,7 +536,7 @@ fn verify_execution(
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     if let [flag, project, image, count] = arguments.as_slice()
-        && (flag == "--measure-continuous" || flag == "--measure-continuous-8")
+        && (flag == "--measure-continuous" || flag == "--measure-continuous-8" || flag == "--measure-circuit-loader")
     {
         let rate = if flag == "--measure-continuous-8" {
             ContinuousRate::Fast
@@ -466,16 +550,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("先頭語数が転送データの範囲外。".into());
         }
         let setup = Instant::now();
+        let complete = count == words.len() - 1;
+        if flag == "--measure-circuit-loader" {
+            let mut machine = Machine::new(uart::circuit_loader_machine(Path::new(project))?, u64::MAX, Loader::Circuit)?;
+            println!("回路を構築 {:.6} s", setup.elapsed().as_secs_f64());
+            return flash_circuit(&mut machine, &words[..=count], complete);
+        }
         let (mut machine, receiver) = continuous_setup(Path::new(project), u64::MAX, rate)?;
         println!("回路を構築 {:.6} s", setup.elapsed().as_secs_f64());
-        return flash_continuous(&mut machine, receiver, &words[..=count], count == words.len() - 1, rate);
+        return flash_continuous(&mut machine, receiver, &words[..=count], complete, rate);
     }
     let rate = match arguments.first() {
         Some(flag) if flag == "--continuous" => Some(ContinuousRate::Standard),
         Some(flag) if flag == "--continuous-8" => Some(ContinuousRate::Fast),
         _ => None,
     };
-    let args = if rate.is_some() { &arguments[1..] } else { &arguments[..] };
+    let circuit_loader = arguments.first().is_some_and(|flag| flag == "--circuit-loader");
+    let args = if rate.is_some() || circuit_loader { &arguments[1..] } else { &arguments[..] };
     let (project, image, log, expected, limit) = match args {
         [project, image, log, info, limit] => {
             let info = u64::from_str_radix(
@@ -500,14 +591,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let image = fs::read(image)?;
     let words = image_words(&image)?;
     let reference = reference_pcs(Path::new(log))?;
-    let mut machine = if let Some(rate) = rate {
+    let mut machine = if circuit_loader {
+        let setup = Instant::now();
+        let mut machine = Machine::new(uart::circuit_loader_machine(Path::new(project))?, limit, Loader::Circuit)?;
+        println!("回路を構築 {:.6} s", setup.elapsed().as_secs_f64());
+        flash_circuit(&mut machine, words, true)?;
+        machine
+    } else if let Some(rate) = rate {
         let setup = Instant::now();
         let (mut machine, receiver) = continuous_setup(Path::new(project), limit, rate)?;
         println!("回路を構築 {:.6} s", setup.elapsed().as_secs_f64());
         flash_continuous(&mut machine, receiver, words, true, rate)?;
         machine
     } else {
-        let mut machine = Machine::new(uart::machine(Path::new(project))?, limit, false)?;
+        let mut machine = Machine::new(uart::machine(Path::new(project))?, limit, Loader::Rom)?;
         flash(&mut machine, words)?;
         machine
     };
