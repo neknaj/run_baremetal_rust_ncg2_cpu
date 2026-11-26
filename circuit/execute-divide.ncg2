@@ -1,11 +1,10 @@
 (namespace rv64
   (export execute-divide)
 
-  ;; DIV・REM 系の命令を選び、符号、演算幅、商と余りのどちらを書くかを返す。
-  ;; 対象外の命令では判別結果と3つの指定をすべて0にする。
-  (func execute-divide
+  ;; M 拡張の OP または OP-32 を認識し、両者を区別するビットと funct3 を得る。
+  (func decode-m-operation
     (in (instruction (bits 32)))
-    (out recognized signed-mode word-mode remainder-mode)
+    (out recognized word-op (funct3 (bits 3)))
     (def (opcode rd funct3 rs1 rs2 funct7 imm-i imm-s imm-b imm-u imm-j)
       (decode instruction))
 
@@ -24,19 +23,27 @@
     (def opcode-difference (concat not-op0 not-op1 op2 not-op4 not-op5 op6))
     (def opcode-matches (execute-zero-6 opcode-difference))
 
-    ;; funct7=1 は M 拡張の演算。funct3 の最上位ビットで乗算と除算を区別する。
+    ;; funct7=1 は M 拡張の演算を表す。
     (def low-funct7 (bit funct7 0))
     (def high-funct7 (slice funct7 1 6))
     (def not-low-funct7 (nor low-funct7 low-funct7))
     (def funct7-difference (concat not-low-funct7 high-funct7))
     (def m-operation (execute-zero-7 funct7-difference))
+    (def recognized (execute-and opcode-matches m-operation))
+    (def word-op op3))
+
+  ;; DIV・REM 系の命令を選び、符号、演算幅、商と余りのどちらを書くかを返す。
+  ;; 対象外の命令では判別結果と3つの指定をすべて0にする。
+  (func execute-divide
+    (in (instruction (bits 32)))
+    (out recognized signed-mode word-mode remainder-mode)
+    (def (m-operation word-op funct3) (decode-m-operation instruction))
     (def divide (bit funct3 2))
-    (def divide-operation (execute-and m-operation divide))
-    (def recognized (execute-and opcode-matches divide-operation))
+    (def recognized (execute-and m-operation divide))
 
     (def unsigned (bit funct3 0))
     (def signed (nor unsigned unsigned))
     (def choose-remainder (bit funct3 1))
     (def signed-mode (execute-and recognized signed))
-    (def word-mode (execute-and recognized op3))
+    (def word-mode (execute-and recognized word-op))
     (def remainder-mode (execute-and recognized choose-remainder))))

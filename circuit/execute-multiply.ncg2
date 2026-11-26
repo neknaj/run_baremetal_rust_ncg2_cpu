@@ -1,0 +1,23 @@
+(namespace rv64
+  (export execute-multiply)
+
+  ;; MUL、MULH、MULHSU、MULHU、MULW を選び、結果補正に使う指定を返す。
+  ;; 対象外の命令では全出力を0とする。
+  (func execute-multiply
+    (in (instruction (bits 32)))
+    (out recognized high-half signed-left signed-right word-mode)
+    (def (m-operation word-op funct3) (decode-m-operation instruction))
+    (def bit-low (bit funct3 0))
+    (def bit-mid (bit funct3 1))
+    (def bit-high (bit funct3 2))
+    (def high-request (execute-or bit-low bit-mid))
+    (def narrow-high (execute-and word-op high-request))
+    (def supported (nor bit-high narrow-high))
+    (def recognized (execute-and m-operation supported))
+    (def high-half (execute-and recognized high-request))
+    (def both-low-bits (execute-and bit-low bit-mid))
+    (def signed (nor both-low-bits both-low-bits))
+    (def signed-left (execute-and high-half signed))
+    (def right-negative-mode (execute-and bit-low signed))
+    (def signed-right (execute-and high-half right-negative-mode))
+    (def word-mode (execute-and recognized word-op))))
