@@ -19,6 +19,7 @@ WORD_COUNT = RAM_SIZE // WORD_SIZE
 ADDRESS_BITS = (WORD_COUNT - 1).bit_length()
 ENTRY = RAM_BASE
 BOOT_IMAGE_END = 0x52000
+BOOT_REQUEST_START = 0x51F00
 BOOT_STACK_START = 0xFFF00
 BOOT_STACK_END = 0x104000
 ROM_ADDRESS_BITS = 5
@@ -157,12 +158,13 @@ def memory_image(elf: bytes, *, layout: RomLayout | None = None) -> bytes:
     return bytes(image)
 
 
-def uart_boot_image(elf: bytes) -> bytes:
+def uart_boot_image(elf: bytes, *, request: bytes | None = None) -> bytes:
     """ブート用の語数と RAM に書き込む語をリトルエンディアンで返す。
 
     書き込み先は 0x10000 から連続する。最後の語に満たない分と領域間の隙間はゼロで埋める。
     最後の初期化済みバイトより後ろの RAM は、リセット時のゼロを使う。
     実行領域または別バンクのゼロ初期化領域に収まらない PT_LOAD は ElfError を返す。
+    要求を指定する場合、ELF で0x51f00から256バイトをゼロ初期化領域として予約する。
     """
     segments = load_segments(elf, image_end=BOOT_STACK_END)
     end_of_data = ENTRY
@@ -178,6 +180,16 @@ def uart_boot_image(elf: bytes) -> bytes:
         raise ElfError(ErrorKind.SEGMENT, "ロード領域が転送先 RAM またはゼロ初期化バンクに収まらない。",
                        segment.header_index)
 
+    if request is not None:
+        request_capacity = BOOT_IMAGE_END - BOOT_REQUEST_START
+        if not 1 <= len(request) <= request_capacity:
+            raise ValueError(f"要求データは1～{request_capacity}バイトにする。")
+        if not any(segment.address == BOOT_REQUEST_START and segment.size == request_capacity
+                   and segment.file_size == 0 and segment.writable and not segment.executable
+                   for segment in segments):
+            raise ElfError(ErrorKind.SEGMENT, "要求用のゼロ初期化領域 0x51f00..0x52000 がない。")
+        end_of_data = BOOT_REQUEST_START + len(request)
+
     word_count = (end_of_data - ENTRY + WORD_SIZE - 1) // WORD_SIZE
     stream = bytearray((word_count + 1) * WORD_SIZE)
     struct.pack_into("<Q", stream, 0, word_count)
@@ -185,6 +197,9 @@ def uart_boot_image(elf: bytes) -> bytes:
         if segment.file_size:
             start = WORD_SIZE + segment.address - ENTRY
             stream[start:start + segment.file_size] = elf[segment.offset:segment.offset + segment.file_size]
+    if request is not None:
+        start = WORD_SIZE + BOOT_REQUEST_START - ENTRY
+        stream[start:start + len(request)] = request
     return bytes(stream)
 
 
@@ -303,11 +318,17 @@ def main() -> int:
     encoders = {"image": bytes, "ncg2m": ncg2m_source, "word-bits": word_bits}
     parser.add_argument("--format", choices=(*encoders, "ncg2-rom", "uart-boot"), default="image")
     parser.add_argument("--rom-layout", choices=ROM_LAYOUTS, help="ncg2-rom の物理アドレス配置。既定は boot。")
+    parser.add_argument("--request", type=Path, help="uart-boot で予約領域に格納する要求データのファイル。")
     args = parser.parse_args()
     if args.elf.resolve() == args.output.resolve():
         parser.error("出力先を入力 ELF と同じファイルにできない。")
     if args.rom_layout is not None and args.format != "ncg2-rom":
         parser.error("--rom-layout は --format ncg2-rom とともに指定する。")
+    if args.request is not None:
+        if args.format != "uart-boot":
+            parser.error("--request は --format uart-boot とともに指定する。")
+        if args.request.resolve() == args.output.resolve():
+            parser.error("出力先を入力の要求データと同じファイルにできない。")
     try:
         elf = args.elf.read_bytes()
         if args.format == "ncg2-rom":
@@ -315,7 +336,8 @@ def main() -> int:
             image = memory_image(elf, layout=layout)
             data = ncg2_rom_source(image, address_bits=layout.address_bits)
         elif args.format == "uart-boot":
-            data = uart_boot_image(elf)
+            request = None if args.request is None else args.request.read_bytes()
+            data = uart_boot_image(elf, request=request)
         else:
             data = encoders[args.format](memory_image(elf))
         write_output(args.output, data)
@@ -323,7 +345,7 @@ def main() -> int:
         location = "" if error.header_index is None else f" PT[{error.header_index}]"
         print(f"{error.kind.value}{location} {error}", file=sys.stderr)
         return 1
-    except OSError as error:
+    except (OSError, ValueError) as error:
         print(error, file=sys.stderr)
         return 1
     return 0

@@ -140,6 +140,23 @@ class LoaderTests(unittest.TestCase):
                 uart_boot_image(executable([code, outside], b"1234x"))
             self.assertEqual((outcome.exception.kind, outcome.exception.header_index), (ErrorKind.SEGMENT, 1))
 
+    def test_uart_request_requires_a_separate_zero_initialized_region(self):
+        code = (1, 5, 0x200, BASE, BASE, 4, 4, 1)
+        reserved = (1, 6, 0x204, 0x51F00, 0x51F00, 0, 0x100, 1)
+        fixture = executable([code, reserved], b"1234")
+        stream = uart_boot_image(fixture, request=b"!" * 129)
+        offset = 8 + 0x51F00 - BASE
+        self.assertEqual(struct.unpack_from("<Q", stream), ((len(stream) - 8) // 8,))
+        self.assertEqual(stream[8:offset], b"1234" + bytes(offset - 12))
+        self.assertEqual(stream[offset:], b"!" * 129 + bytes(7))
+
+        with self.assertRaises(ElfError) as outcome:
+            uart_boot_image(executable([code], b"1234"), request=b"!")
+        self.assertEqual(outcome.exception.kind, ErrorKind.SEGMENT)
+        for invalid in [b"", bytes(257)]:
+            with self.subTest(size=len(invalid)), self.assertRaises(ValueError):
+                uart_boot_image(fixture, request=invalid)
+
 
 if __name__ == "__main__":
     unittest.main()
