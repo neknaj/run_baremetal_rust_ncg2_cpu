@@ -18,6 +18,10 @@ WORD_BITS = WORD_SIZE * 8
 WORD_COUNT = RAM_SIZE // WORD_SIZE
 ADDRESS_BITS = (WORD_COUNT - 1).bit_length()
 ENTRY = RAM_BASE
+ROM_ADDRESS_BITS = 5
+ROM_WORDS = 1 << ROM_ADDRESS_BITS
+ROM_END = RAM_BASE + ROM_WORDS * WORD_SIZE
+WRITABLE_BANKS = ((0x11000, 0x12000), (0x2C000, RAM_END))
 
 ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
 PROGRAM_HEADER = struct.Struct("<IIQQQQQQ")
@@ -27,6 +31,7 @@ PT_LOAD = 1
 PT_DYNAMIC = 2
 PT_INTERP = 3
 PF_X = 1
+PF_W = 2
 
 
 class ErrorKind(Enum):
@@ -54,6 +59,7 @@ class Segment:
     offset: int
     file_size: int
     executable: bool
+    writable: bool
     header_index: int
 
 
@@ -90,13 +96,14 @@ def load_segments(elf: bytes) -> tuple[Segment, ...]:
             continue
         if file_size > mem_size or offset + file_size > len(elf):
             raise ElfError(ErrorKind.SEGMENT, "ロードするバイト範囲がファイルまたはメモリサイズを越える。", index)
-        # この回路は PC とデータのアドレスを同じ RAM に直接対応付ける。
+        # PC とデータのアドレスは同じ物理アドレス空間で扱う。
         if vaddr != paddr or not RAM_BASE <= vaddr <= vaddr + mem_size <= RAM_END:
             raise ElfError(ErrorKind.SEGMENT, "仮想アドレスと物理アドレスが異なるか、指定 RAM の範囲外。", index)
         if align > 1 and ((align & (align - 1)) != 0 or vaddr % align != offset % align):
             raise ElfError(ErrorKind.SEGMENT, "PT_LOAD の整列条件を満たしていない。", index)
         if mem_size:
-            segments.append(Segment(vaddr, mem_size, offset, file_size, bool(seg_flags & PF_X), index))
+            segments.append(Segment(vaddr, mem_size, offset, file_size,
+                                    bool(seg_flags & PF_X), bool(seg_flags & PF_W), index))
 
     segments.sort(key=lambda segment: segment.address)
     end = RAM_BASE
@@ -110,11 +117,22 @@ def load_segments(elf: bytes) -> tuple[Segment, ...]:
     return tuple(segments)
 
 
-def memory_image(elf: bytes) -> bytes:
-    """RAM の先頭から128 KiBのイメージを作る。BSS と未使用の位置は0で埋める。"""
+def memory_image(elf: bytes, *, for_rom: bool = False) -> bytes:
+    """128 KiBのイメージを作る。for_rom では各領域を回路のバンクに限定する。"""
     segments = load_segments(elf)
     image = bytearray(RAM_SIZE)
     for segment in segments:
+        if for_rom:
+            end = segment.address + segment.size
+            if segment.writable:
+                fits = (not segment.executable and segment.file_size == 0
+                        and any(base <= segment.address < end <= limit
+                                for base, limit in WRITABLE_BANKS))
+            else:
+                fits = RAM_BASE <= segment.address < end <= ROM_END
+            if not fits:
+                raise ElfError(ErrorKind.SEGMENT, "ロード領域が起動 ROM またはゼロ初期化 RAM に収まらない。",
+                               segment.header_index)
         start = segment.address - RAM_BASE
         image[start:start + segment.file_size] = elf[segment.offset:segment.offset + segment.file_size]
     return bytes(image)
@@ -153,6 +171,37 @@ def word_bits(image: bytes) -> bytes:
     return "".join(f"{line}\n" for line in lines).encode("ascii")
 
 
+def ncg2_rom_source(image: bytes) -> bytes:
+    """起動 ELF の先頭256バイトを読む NCG2 回路を生成する。"""
+    words = dict(nonzero_words(image))
+    if any(index >= ROM_WORDS for index in words):
+        raise ElfError(ErrorKind.SEGMENT, "起動 ROM の先頭256バイトより後ろに非ゼロの初期値がある。")
+
+    lines = [
+        "(namespace rv64",
+        "  (export firmware-rom)",
+        "",
+        "  ;; 起動 ELF の初期化済みデータを、下位バイトから並べた64ビット語で読む。",
+        "  ;; tools/elf_image.py --format ncg2-rom で更新する。",
+        f"  (func firmware-rom (in (word-index (bits {ROM_ADDRESS_BITS}))) (out (word (bits 64)))",
+    ]
+    for bit in range(ROM_ADDRESS_BITS):
+        lines.append(f"    (def select-{bit} (bit word-index {bit}))")
+    stage = [f"word-{index}" for index in range(ROM_WORDS)]
+    for index, name in enumerate(stage):
+        lines.append(f"    (def {name} #x{words.get(index, 0):016x})")
+    for bit in range(ROM_ADDRESS_BITS):
+        next_stage = []
+        for index in range(0, len(stage), 2):
+            output = "word" if len(stage) == 2 else f"selected-{bit}-{index // 2}"
+            lines.append(f"    (def {output} (::rv64::arithmetic::select select-{bit} "
+                         f"{stage[index]} {stage[index + 1]}))")
+            next_stage.append(output)
+        stage = next_stage
+    lines[-1] += "))"
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 def write_output(path: Path, data: bytes) -> None:
     """書き込みが完了した成果物を出力先に置く。"""
     with tempfile.TemporaryDirectory(prefix=".elf-image-", dir=path.parent) as staging:
@@ -165,13 +214,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("elf", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--format", choices=("image", "ncg2m", "word-bits"), default="image")
+    encoders = {
+        "image": bytes, "ncg2m": ncg2m_source, "word-bits": word_bits,
+        "ncg2-rom": ncg2_rom_source,
+    }
+    parser.add_argument("--format", choices=encoders, default="image")
     args = parser.parse_args()
     if args.elf.resolve() == args.output.resolve():
         parser.error("出力先を入力 ELF と同じファイルにできない。")
-    encoders = {"image": bytes, "ncg2m": ncg2m_source, "word-bits": word_bits}
     try:
-        image = memory_image(args.elf.read_bytes())
+        image = memory_image(args.elf.read_bytes(), for_rom=args.format == "ncg2-rom")
         write_output(args.output, encoders[args.format](image))
     except ElfError as error:
         location = "" if error.header_index is None else f" PT[{error.header_index}]"

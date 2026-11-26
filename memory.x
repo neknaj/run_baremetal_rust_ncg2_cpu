@@ -8,6 +8,7 @@ MEMORY {
 PHDRS {
     code PT_LOAD FLAGS(5);
     data PT_LOAD FLAGS(6);
+    stack PT_LOAD FLAGS(6);
 }
 
 SECTIONS {
@@ -36,11 +37,11 @@ SECTIONS {
         __stack_bottom = .;
         . += 0x3ff0;
         __stack_top = .;
-    } > RAM :data
+    } > RAM :stack
 
     .result ORIGIN(RAM) + LENGTH(RAM) - 16 (NOLOAD) : {
         KEEP(*(.result))
-    } > RAM :data
+    } > RAM :stack
 
     /DISCARD/ : { *(.eh_frame .eh_frame_hdr) }
 }

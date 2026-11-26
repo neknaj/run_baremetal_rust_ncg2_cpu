@@ -4,6 +4,7 @@ use circuitgame2_core::{
     netlist::{NorNetlist, Wire},
     project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project},
 };
+mod firmware;
 
 fn name(wire: Wire) -> String {
     match wire {
@@ -21,11 +22,13 @@ fn vector(bits: impl Iterator<Item = String> + DoubleEndedIterator) -> String {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let Some(selected @ ("add" | "shift-left" | "boot-ram-address" | "execute-boot")) =
-        args.get(1).map(String::as_str)
+    let Some(
+        selected @ ("add" | "shift-left" | "boot-ram-address" | "execute-boot" | "firmware-rom"
+        | "firmware-fetch" | "firmware-data-map"),
+    ) = args.get(1).map(String::as_str)
     else {
         return Err(
-            "add、shift-left、boot-ram-address、execute-boot のいずれかを指定する。".into(),
+            "検証対象として add、shift-left、boot-ram-address、execute-boot、firmware-rom、firmware-fetch、firmware-data-map のいずれかを指定する。".into(),
         );
     };
     let arithmetic = ["decode.ncg2", "arithmetic.ncg2"];
@@ -42,6 +45,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths = match selected {
         "boot-ram-address" => &boot[..],
         "execute-boot" => &["decode.ncg2", "arithmetic.ncg2", "execute-boot.ncg2"],
+        "firmware-rom" => &["decode.ncg2", "arithmetic.ncg2", "firmware-rom.ncg2"],
+        "firmware-fetch" | "firmware-data-map" => &[
+            "decode.ncg2",
+            "arithmetic.ncg2",
+            "boot-rom.ncg2",
+            "fetch-boot.ncg2",
+            "execute-boot.ncg2",
+            "firmware-rom.ncg2",
+            "firmware-memory.ncg2",
+        ],
         _ => &arithmetic[..],
     };
     let sources = paths
@@ -87,9 +100,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "shift-left" => (70, 64),
         "boot-ram-address" => (64, 12),
         "execute-boot" => (224, 264),
+        "firmware-rom" => (5, 64),
+        "firmware-fetch" => (64, 33),
+        "firmware-data-map" => (64, 28),
         _ => unreachable!(),
     };
     assert_eq!((*input_count, outputs.len()), expected_shape);
+    if selected == "firmware-data-map" {
+        let bank_form = circuit
+            .names
+            .iter()
+            .find(|n| n.name.word == "firmware-unmatched-banks")
+            .ok_or("バンク判定の宣言が見つからない。")?
+            .form;
+        let bank = circuit
+            .syntax
+            .entries
+            .iter()
+            .position(|e| e.form == bank_form)
+            .ok_or("バンク判定の索引が見つからない。")?;
+        let built = aliases
+            .expand_reachable_function((file, bank), 65536, 1_048_576, 1_048_576)
+            .map_err(|error| format!("{error:?}"))?
+            .ok_or("バンク判定の展開結果がない。")?;
+        firmware::verify_bank_delay(built.netlist());
+    }
 
     println!("(set-logic QF_BV)");
     println!("(set-option :timeout 30000)");
@@ -103,7 +138,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             name(gate.right)
         );
     }
-    if selected == "execute-boot" {
+    if matches!(selected, "firmware-rom" | "firmware-fetch") {
+        let path = args
+            .get(2)
+            .ok_or("ELF から変換したバイナリイメージを指定する。")?;
+        firmware::emit_rom(selected, outputs, &std::fs::read(path)?)?;
+    } else if selected == "firmware-data-map" {
+        firmware::emit_data_map(outputs);
+    } else if selected == "execute-boot" {
         for (port, start, stop) in [
             ("instruction", 0, 32),
             ("pc", 32, 96),

@@ -59,6 +59,17 @@ cargo +nightly build --release --locked -Z build-std=core
 
 成果物は `target/riscv64im-unknown-none-elf/release/ncg2-rv64-boot`。ELF のロード領域を配置したあと、`0x10000` から実行する。起動コードがスタックを用意して BSS を消去し、Rust の `rust_main` を呼ぶ。`boot_halt` 到達後に RAM の `0x2fff0` が成功値 `1`、`0x2fff8` が `0x0000_0005_0000_0003` なら検査成功。A・C・F・D を無効にした QEMU ユーザーモードで確認した。
 
+## ELF を回路のメモリに載せる
+
+`circuit/firmware-rom.ncg2` は、起動 ELF の命令と読み取り専用データを格納する。通常の実行は NCG2 のファイルを使う。Rust を変更したときに、生成済み ROM を更新する。
+
+```sh
+python tools/elf_image.py target/riscv64im-unknown-none-elf/release/ncg2-rv64-boot \
+  circuit/firmware-rom.ncg2 --format ncg2-rom
+```
+
+フェッチと、ROM・BSS・スタックの読み書き回路は[起動 ELF のメモリ配置](doc/firmware-memory.md)に記す。現在のプロジェクトの実行入口は固定6命令の起動回路である。
+
 ## NCG2M のプログラムデータ
 
 `programs/boot.ncg2m` は、RAM の初期内容を64ビット語の添字と値で表す。省略した語の値は0。Rust を変更したときは、開発時に ELF から更新する。

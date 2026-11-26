@@ -1,0 +1,143 @@
+(namespace rv64
+  (export firmware-fetch firmware-data-map firmware-data-memory)
+
+  (memory firmware-bss (address 9) (data (bits 64)))
+  (memory firmware-stack (address 11) (data (bits 64)))
+  (latch firmware-ready-bit (width 1))
+  (latch firmware-ram-frame (width 129))
+
+  (module firmware-frame-2 (in (input (bits 129))) (out (output (bits 129)))
+    (def half (firmware-ram-frame input 1))
+    (def output (firmware-ram-frame half 1)))
+
+  (module firmware-frame-4 (in (input (bits 129))) (out (output (bits 129)))
+    (def half (firmware-frame-2 input))
+    (def output (firmware-frame-2 half)))
+
+  (module firmware-frame-8 (in (input (bits 129))) (out (output (bits 129)))
+    (def half (firmware-frame-4 input))
+    (def output (firmware-frame-4 half)))
+
+  ;; RV64IM の命令は4バイトごとに並ぶ。低位の命令が64ビット語の先頭にある。
+  ;; PC オフセットが256バイトの ROM に収まらない場合は valid を0にする。
+  (func firmware-fetch
+    (in (pc-offset (bits 64)))
+    (out (instruction (bits 32)) valid)
+    (def word-index (slice pc-offset 3 5))
+    (def half (bit pc-offset 2))
+    (def word (firmware-rom word-index))
+    (def low (slice word 0 32))
+    (def high (slice word 32 32))
+    (def zero #x00000000)
+    (def packed-low (concat low zero))
+    (def packed-high (concat high zero))
+    (def selected (::rv64::arithmetic::select half packed-low packed-high))
+    (def instruction (slice selected 0 32))
+    (def alignment (slice pc-offset 0 2))
+    (def outside (slice pc-offset 8 56))
+    (def padding #b000000)
+    (def tested (concat alignment outside padding))
+    (def invalid (any-bit-64 tested))
+    (def valid (nor invalid invalid)))
+
+  ;; 各比較を64入力・深さ12の同じ NOR 木で行い、バンク判定の tick をそろえる。
+  (func firmware-unmatched-banks
+    (in (address (bits 64)) not-12 not-14 not-15 not-16 not-17)
+    (out outside-rom outside-bss outside-stack)
+    (def word-alignment (slice address 0 3))
+    (def high (slice address 18 46))
+    (def address-13 (bit address 13))
+    (def address-14 (bit address 14))
+    (def address-15 (bit address 15))
+    (def address-16 (bit address 16))
+    (def address-17 (bit address 17))
+
+    (def rom-mid (slice address 8 8))
+    (def rom-padding #b00000)
+    (def rom-tested (concat word-alignment rom-mid not-16 address-17 high rom-padding))
+    (def outside-rom (any-bit-64 rom-tested))
+
+    (def bss-padding #b000000000)
+    (def bss-tested (concat word-alignment not-12 address-13 address-14 address-15
+                            not-16 address-17 high bss-padding))
+    (def outside-bss (any-bit-64 bss-tested))
+
+    (def stack-padding #b00000000000)
+    (def stack-tested (concat word-alignment not-14 not-15 address-16 not-17
+                              high stack-padding))
+    (def outside-stack (any-bit-64 stack-tested)))
+
+  ;; データ側は絶対アドレスを使い、8バイト境界にある語だけを受け付ける。
+  ;; 0x10000～0x100ff は ROM、0x11000～0x11fff と0x2c000～0x2ffff は RAM。
+  ;; 各添字は対応する選択ビットが1の場合に使う。
+  (func firmware-data-map
+    (in (address (bits 64)))
+    (out rom bss stack (rom-word (bits 5)) (bss-word (bits 9)) (stack-word (bits 11)))
+    (def a12 (bit address 12))
+    (def a14 (bit address 14))
+    (def a15 (bit address 15))
+    (def a16 (bit address 16))
+    (def a17 (bit address 17))
+    (def not-12 (nor a12 a12))
+    (def not-14 (nor a14 a14))
+    (def not-15 (nor a15 a15))
+    (def not-16 (nor a16 a16))
+    (def not-17 (nor a17 a17))
+    (def (outside-rom outside-bss outside-stack)
+      (firmware-unmatched-banks address not-12 not-14 not-15 not-16 not-17))
+    (def rom (nor outside-rom outside-rom))
+    (def bss (nor outside-bss outside-bss))
+    (def stack (nor outside-stack outside-stack))
+    (def rom-word (slice address 3 5))
+    (def bss-word (slice address 3 9))
+    (def stack-word (slice address 3 11)))
+
+  ;; tick t のフレームで書き込みを指定すると、t + 15 の RAM 更新に反映する。
+  ;; アドレス・データ・許可をフレームごとにそろえ、ROM と未配置のアドレスには書き込まない。
+  ;; 読み出すときはアドレスを32 tick 保持したあと、readable と read-data を使う。
+  (module firmware-data-memory
+    (in (address (bits 64)) (write-data (bits 64)) write)
+    (out (read-data (bits 64)) readable writable)
+    (def (rom bss stack rom-word bss-word stack-word) (firmware-data-map address))
+    (def rom-data (firmware-rom rom-word))
+    (def writable (execute-or bss stack))
+    (def readable (execute-or rom writable))
+
+    ;; ラッチで取り込むアドレスと、NOR を通る反転ビットは同じフレームから得る。
+    (def incoming (concat address write-data write))
+    (def request-1 (firmware-ram-frame incoming 1))
+    (def framed-address (slice request-1 0 64))
+    (def a12 (bit address 12))
+    (def a14 (bit address 14))
+    (def a15 (bit address 15))
+    (def a16 (bit address 16))
+    (def a17 (bit address 17))
+    (def not-12 (nor a12 a12))
+    (def not-14 (nor a14 a14))
+    (def not-15 (nor a15 a15))
+    (def not-16 (nor a16 a16))
+    (def not-17 (nor a17 a17))
+    (def (unmatched-rom unmatched-bss unmatched-stack)
+      (firmware-unmatched-banks framed-address not-12 not-14 not-15 not-16 not-17))
+
+    ;; 判定が届く t + 12 に反転した許可も届く。RAM は t + 15 に確定する。
+    (def request-9 (firmware-frame-8 request-1))
+    (def request-11 (firmware-frame-2 request-9))
+    (def request-12 (firmware-ram-frame request-11 1))
+    (def write-at-12 (bit request-12 128))
+    (def no-write (nor write-at-12 write-at-12))
+    (def request-bss (nor unmatched-bss no-write))
+    (def request-stack (nor unmatched-stack no-write))
+    (def startup-1 (firmware-ready-bit 1 1))
+    (def startup-2 (firmware-ready-bit startup-1 1))
+    (def bss-write (firmware-ready-bit request-bss startup-2))
+    (def stack-write (firmware-ready-bit request-stack startup-2))
+    (def request-14 (firmware-frame-2 request-12))
+    (def request-15 (firmware-ram-frame request-14 1))
+    (def bss-address (slice request-15 3 9))
+    (def stack-address (slice request-15 3 11))
+    (def ram-write-data (slice request-15 64 64))
+    (def bss-data (firmware-bss bss-address ram-write-data bss-write))
+    (def stack-data (firmware-stack stack-address ram-write-data stack-write))
+    (def ram-data (::rv64::arithmetic::select stack bss-data stack-data))
+    (def read-data (::rv64::arithmetic::select rom ram-data rom-data))))

@@ -4,7 +4,7 @@ import re
 import struct
 import unittest
 
-from elf_image import ErrorKind, ElfError, memory_image, ncg2m_source, word_bits
+from elf_image import ErrorKind, ElfError, memory_image, ncg2_rom_source, ncg2m_source, word_bits
 
 
 BASE = 0x10000
@@ -78,6 +78,27 @@ class LoaderTests(unittest.TestCase):
             reconstructed[index * 8:(index + 1) * 8] = value.to_bytes(8, "little")
         self.assertEqual(reconstructed, image)
         self.assertEqual(image[-16:], bytes(16))
+
+    def test_rom_uses_file_bytes_and_separate_zeroed_banks(self):
+        code = (1, 5, 0x200, BASE, BASE, 8, 8, 1)
+        bss = (1, 6, 0x208, 0x11000, 0x11000, 0, 8, 1)
+        stack = (1, 6, 0x208, 0x2C000, 0x2C000, 0, 0x4000, 1)
+        image = memory_image(executable([code, bss, stack], bytes(range(8))), for_rom=True)
+        self.assertIn(b"(def word-0 #x0706050403020100)", ncg2_rom_source(image))
+        self.assertIn(b"(def word-1 #x0000000000000000)", ncg2_rom_source(image))
+
+    def test_rom_rejects_bytes_and_zero_init_outside_their_banks(self):
+        code = (1, 5, 0x200, BASE, BASE, 4, 4, 1)
+        for row in (
+            (1, 5, 0x204, BASE + 0xFC, BASE + 0xFC, 0, 8, 1),
+            (1, 6, 0x204, 0x11000, 0x11000, 4, 8, 1),
+            (1, 6, 0x204, 0x11FF8, 0x11FF8, 0, 16, 1),
+            (1, 6, 0x204, 0x12000, 0x12000, 0, 8, 1),
+        ):
+            with self.subTest(row=row), self.assertRaises(ElfError) as outcome:
+                memory_image(executable([code, row], bytes(8)), for_rom=True)
+            self.assertEqual((outcome.exception.kind, outcome.exception.header_index),
+                             (ErrorKind.SEGMENT, 1))
 
 
 if __name__ == "__main__":
