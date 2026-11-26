@@ -4,7 +4,7 @@ Neknaj Circuit Game 2 で RV64IM の CPU を組み、ベアメタル Rust のプ
 
 ## 命令デコーダを試す
 
-`circuit/decode.ncg2` は、32ビット命令語から opcode、レジスタ番号、funct3、funct7 と、64ビットに符号拡張した I・S・B・U・J 形式の即値を取り出す。命令形式の選択、PC とレジスタの更新、メモリアクセスは後続の回路で扱う。
+`circuit/decode.ncg2` は、32ビット命令語から opcode、レジスタ番号、funct3、funct7 と、64ビットに符号拡張した I・S・B・U・J 形式の即値を取り出す。命令形式の選択、レジスタの更新、メモリアクセスは後続の回路で扱う。
 
 ```sh
 ncg2 check circuit/decode.ncg2
@@ -12,6 +12,17 @@ ncg2 eval --func ::rv64::decode --input 00000000000000000000000000000001 circuit
 ```
 
 ビット列は各ポートの最下位ビットから並べる。この例では命令語のビット31だけを立て、即値の上位が1になることを確認できる。エンコードは [RISC-V の仕様](https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#_base_instruction_formats) に従う。
+
+## PC の保持を試す
+
+`circuit/program-counter.ncg2` は、起動アドレス `0x10000` からの64ビットのオフセット `pc-offset` を保持する。リセット後はオフセットが0になる。フェッチ先は `0x10000 + pc-offset` を64ビットに収めた値である。
+
+```sh
+ncg2 check circuit/decode.ncg2 circuit/program-counter.ncg2
+ncg2 run --entry ::rv64::program-counter --input 10000000000000000000000000000000000000000000000000000000000000001 --input 00000000000000000000000000000000000000000000000000000000000000000 circuit/decode.ncg2 circuit/program-counter.ncg2
+```
+
+先頭行はリセット直後の出力で、後続の行は各 tick の確定後の出力。最初の入力は `next-offset = 1` と `write-enable = 1` を指定する。次の tick では許可ビットが0なのでオフセット1を保持する。出力を最下位ビットから読むと、オフセットは順に `0, 1, 1` となる。ラッチの更新と観測は [NCG2 の tick と状態素子の仕様](https://neknaj.github.io/circuitgame2/docs/simulation.html#状態素子) に従う。
 
 ## 起動 ELF を作る
 

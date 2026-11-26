@@ -1,0 +1,14 @@
+(namespace rv64
+  (export program-counter)
+
+  (latch pc-offset-store (width 64))
+
+  ;; tick t の出力を Q[t] とする。reset では Q[0] = 0。
+  ;; 次の入力が (d, e) のとき、e = 1 なら Q[t+1] = d、e = 0 なら Q[t+1] = Q[t]。
+  ;; 出力はラッチの確定値に直結するため、最初の書き込みも同じ tick の出力で観測できる。
+  ;; フェッチ先は (0x10000 + Q[t]) mod 2^64。保持する値と書き込み入力はともにオフセットで表す。
+  ;; 遷移の根拠は Core の latch_next と ClockedVm の reset・step の契約。
+  (module program-counter
+    (in (next-offset (bits 64)) write-enable)
+    (out (pc-offset (bits 64)))
+    (def pc-offset (pc-offset-store next-offset write-enable))))
