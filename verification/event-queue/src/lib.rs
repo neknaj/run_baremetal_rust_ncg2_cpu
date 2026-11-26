@@ -7,6 +7,7 @@ pub mod delay;
 pub mod fanout;
 pub mod nor_groups;
 pub mod nor_inputs;
+pub mod shared_nor;
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
