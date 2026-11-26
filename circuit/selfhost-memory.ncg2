@@ -117,6 +117,13 @@
     (def writable (execute-or low-ram stack))
     (def readable (execute-or rom writable)))
 
+  ;; このプロファイルでは、語またはその一部への書き込みに同じ範囲を使う。
+  (func firmware-full-store-access (in (address (bits 64))) (out writable)
+    (def (readable writable) (firmware-data-access address)))
+
+  (func firmware-subword-access (in (address (bits 64))) (out readable writable)
+    (def (readable writable) (firmware-data-access address)))
+
   ;; PC の相対位置が 0x6000 未満かつ4バイト境界のときに命令を返す。
   (func firmware-fetch
     (in (pc-offset (bits 64))) (out (instruction (bits 32)) valid)

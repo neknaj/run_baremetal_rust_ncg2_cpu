@@ -20,10 +20,17 @@
     (def (ack less-ack) (::rv64::arithmetic::compare-unsigned address ack-address)))
 
   (func firmware-data-access (in (address (bits 64))) (out readable writable)
-    (def (app status data ack) (uart-test-map address))
+    (def (writable status data ack) (uart-test-map address))
     (def uart-readable (execute-or status data))
-    (def readable (execute-or uart-readable app))
+    (def readable (execute-or uart-readable writable)))
+
+  (func firmware-full-store-access (in (address (bits 64))) (out writable)
+    (def (app status data ack) (uart-test-map address))
     (def writable (execute-or ack app)))
+
+  (func firmware-subword-access (in (address (bits 64))) (out readable writable)
+    (def (readable status data ack) (uart-test-map address))
+    (def writable readable))
 
   (func uart-test-read
     (in status data app rx-ready (rx-word (bits 64)) (ram-output (bits 64)))

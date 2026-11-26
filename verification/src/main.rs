@@ -58,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | "mul-round"
         | "firmware-dispatch"
         | "firmware-dispatch-core"
+        | "firmware-dispatch-uart"
         | "selfhost-data-map"
         | "uart-ram-map"),
     ) = args.get(1).map(String::as_str)
@@ -66,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let arithmetic = ["decode.ncg2", "arithmetic.ncg2"];
     let core_profile = selected == "firmware-dispatch-core";
+    let uart_profile = selected == "firmware-dispatch-uart";
     let boot = [
         "decode.ncg2",
         "boot-rom.ncg2",
@@ -76,6 +78,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-boot.ncg2",
         "boot-machine.ncg2",
     ];
+    let memory: &[&str] = match selected {
+        "firmware-dispatch-core" => &["firmware-rom.ncg2", "selfhost-memory.ncg2"],
+        "firmware-dispatch-uart" => &[
+            "selfhost-map.ncg2",
+            "uart-ram-map.ncg2",
+            "uart-boot-mmio.ncg2",
+            "uart-access.ncg2",
+        ],
+        _ => &["firmware-rom.ncg2", "firmware-memory.ncg2"],
+    };
+    let dispatch_sources: Vec<_> = [
+        "decode.ncg2",
+        "arithmetic.ncg2",
+        "boot-rom.ncg2",
+        "fetch-boot.ncg2",
+        "execute-boot.ncg2",
+        "execute-control.ncg2",
+    ]
+    .into_iter()
+    .chain(memory.iter().copied())
+    .chain([
+        "execute-load.ncg2",
+        "execute-logic.ncg2",
+        "subword-memory.ncg2",
+        "execute-subword.ncg2",
+        "execute-alu.ncg2",
+        "firmware-dispatch.ncg2",
+    ])
+    .collect();
     let paths = match selected {
         "boot-ram-address" => &boot[..],
         "execute-boot" => &["decode.ncg2", "arithmetic.ncg2", "execute-boot.ncg2"],
@@ -92,26 +123,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "execute-logic.ncg2",
         ],
         "mul-round" => &["decode.ncg2", "arithmetic.ncg2", "multiply.ncg2"],
-        "firmware-dispatch" | "firmware-dispatch-core" => &[
-            "decode.ncg2",
-            "arithmetic.ncg2",
-            "boot-rom.ncg2",
-            "fetch-boot.ncg2",
-            "execute-boot.ncg2",
-            "execute-control.ncg2",
-            "firmware-rom.ncg2",
-            if core_profile {
-                "selfhost-memory.ncg2"
-            } else {
-                "firmware-memory.ncg2"
-            },
-            "execute-load.ncg2",
-            "execute-logic.ncg2",
-            "subword-memory.ncg2",
-            "execute-subword.ncg2",
-            "execute-alu.ncg2",
-            "firmware-dispatch.ncg2",
-        ],
+        "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => {
+            &dispatch_sources
+        }
         "execute-load" => &[
             "decode.ncg2",
             "arithmetic.ncg2",
@@ -172,7 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let aliases = check_use_aliases(&targets).map_err(|error| format!("{error:?}"))?;
     let file = paths.len() - 1;
     let circuit = &project.circuits()[file];
-    let function = if core_profile {
+    let function = if core_profile || uart_profile {
         "firmware-dispatch"
     } else {
         selected
@@ -208,7 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-load" => (96, 71),
         "execute-logic" => (160, 67),
         "mul-round" => (386, 257),
-        "firmware-dispatch" | "firmware-dispatch-core" => (417, 266),
+        "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => (417, 266),
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
         "firmware-data-map" => (64, 28),
@@ -224,7 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-load" => Some(468),
         "execute-logic" => Some(31),
         "mul-round" => Some(457),
-        "firmware-dispatch" | "firmware-dispatch-core" => Some(505),
+        "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => Some(505),
         "uart-ram-map" => Some(31),
         _ => None,
     };
@@ -278,8 +292,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firmware::emit_uart_ram_map(outputs);
     } else if selected == "mul-round" {
         multiply::emit(outputs);
-    } else if matches!(selected, "firmware-dispatch" | "firmware-dispatch-core") {
-        firmware::emit_dispatch(outputs, core_profile);
+    } else if matches!(
+        selected,
+        "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart"
+    ) {
+        firmware::emit_dispatch(outputs, core_profile, uart_profile);
     } else if matches!(selected, "execute-load" | "execute-logic") {
         let instruction = vector((0..32).map(|i| format!("i{i}")));
         let rs1 = vector((32..96).map(|i| format!("i{i}")));

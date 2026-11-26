@@ -98,6 +98,13 @@
     (def writable (execute-or bss stack))
     (def readable (execute-or rom writable)))
 
+  ;; このプロファイルでは、語またはその一部への書き込みに同じ範囲を使う。
+  (func firmware-full-store-access (in (address (bits 64))) (out writable)
+    (def (readable writable) (firmware-data-access address)))
+
+  (func firmware-subword-access (in (address (bits 64))) (out readable writable)
+    (def (readable writable) (firmware-data-access address)))
+
   ;; tick t のフレームで書き込みを指定すると、t + 15 の RAM 更新に反映する。
   ;; アドレス・データ・許可をフレームごとにそろえ、ROM と未配置のアドレスには書き込まない。
   ;; 読み出すときはアドレスを32 tick 保持したあと、readable と read-data を使う。

@@ -21,7 +21,7 @@
     (def (logic multiply logic-data high-product) (execute-logic instruction first-value second-value))
     (def (alu alu-data) (::rv64::arithmetic::execute-alu instruction first-value second-value))
 
-    (def (readable writable) (firmware-data-access store-address))
+    (def writable (firmware-full-store-access store-address))
     (def not-store (nor store store))
     (def store-valid (execute-or not-store writable))
     (def basic-accepted (execute-and basic-valid store-valid))

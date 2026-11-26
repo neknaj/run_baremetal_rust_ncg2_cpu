@@ -73,11 +73,14 @@
 (define-fun in-range ((at (_ BitVec 64)) (first (_ BitVec 64)) (end (_ BitVec 64))) Bool
   (and (bvuge at first) (bvult at end)))
 (define-fun ram ((at (_ BitVec 64))) Bool
-  (ite core-profile
-    (or (in-range at #x0000000000016000 #x0000000000019000)
-        (in-range at #x000000000002bf00 #x0000000000030000))
-    (or (in-range at #x0000000000011000 #x0000000000012000)
-        (in-range at #x000000000002c000 #x0000000000030000))))
+  (ite uart-profile
+    (or (in-range at #x0000000000010000 #x0000000000052000)
+        (in-range at #x00000000000fff00 #x0000000000104000))
+    (ite core-profile
+      (or (in-range at #x0000000000016000 #x0000000000019000)
+          (in-range at #x000000000002bf00 #x0000000000030000))
+      (or (in-range at #x0000000000011000 #x0000000000012000)
+          (in-range at #x000000000002c000 #x0000000000030000)))))
 (define-fun aligned-word ((at (_ BitVec 64))) Bool
   (= (bvurem at (_ bv8 64)) (_ bv0 64)))
 (define-fun sum-i () (_ BitVec 64) (bvadd rs1 immediate-i))
@@ -91,16 +94,22 @@
 (define-fun selected-partial () Bool (or sb
     (and sh (= (bvurem store-address (_ bv2 64)) (_ bv0 64)))
     (and sw (= (bvurem store-address (_ bv4 64)) (_ bv0 64)))))
-(define-fun readable ((address (_ BitVec 64))) Bool
+(define-fun subword-readable ((address (_ BitVec 64))) Bool
   (or (ram address)
-      (in-range address #x0000000000010000
-        (ite core-profile #x0000000000016000 #x0000000000010100))))
+      (and (not uart-profile)
+           (in-range address #x0000000000010000
+             (ite core-profile #x0000000000016000 #x0000000000010100)))))
+; UART の語レジスタに別名はない。アドレスの下位3ビットを消す部分アクセスは RAM に限る。
+(define-fun uart-readable ((address (_ BitVec 64))) Bool
+  (and uart-profile (or (= address #x0000000000200000) (= address #x0000000000200008))))
+(define-fun uart-ack ((address (_ BitVec 64))) Bool
+  (and uart-profile (= address #x0000000000200010)))
 (define-fun load-ok () Bool
-  (or (and ld (aligned-word sum-i) (readable sum-i))
-      (and load-small (readable (word-address sum-i))
+  (or (and ld (aligned-word sum-i) (or (subword-readable sum-i) (uart-readable sum-i)))
+      (and load-small (subword-readable (word-address sum-i))
            (or load-byte (= (bvurem sum-i (_ bv2 64)) (_ bv0 64))))))
 (define-fun store-ok () Bool
-  (or (and selected-store (ram store-address))
+  (or (and selected-store (or (ram store-address) (uart-ack store-address)))
       (and selected-partial (ram (word-address store-address)))))
 (define-fun memory-address-expected () (_ BitVec 64)
   (ite ld sum-i

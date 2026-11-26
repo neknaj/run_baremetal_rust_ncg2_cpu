@@ -35,7 +35,7 @@
     (def address-upper (slice address 3 61))
     (def zeros #b000)
     (def word-address (concat zeros address-upper))
-    (def (readable writable) (firmware-data-access word-address))
+    (def (readable writable) (firmware-subword-access word-address))
     (def (aligned-halfword halfword-data) (::rv64::memory::read-halfword word-before byte-offset unsigned))
     (def byte (nor f0 f0))
     (def aligned-load (execute-or byte aligned-halfword))

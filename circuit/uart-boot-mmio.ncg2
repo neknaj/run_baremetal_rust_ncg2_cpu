@@ -125,6 +125,43 @@
     (def history (mmio-delay-5 data 1))
     (def delayed (bit history 4)))
 
+  (func mmio-address-bits
+    (in (address (bits 64))) (out extra-bit region data-offset ack-offset)
+    ;; 0x200000, 0x200008, 0x200010 はビット21だけが共通の1。ビット3と4で端子を選ぶ。
+    (def low (slice address 0 3))
+    (def middle (slice address 5 16))
+    (def high (slice address 22 42))
+    (def zeros #b00)
+    (def zero #b0)
+    (def common-bits (concat low zeros middle zero high))
+    (def extra-bit (mmio-any-64 common-bits))
+    (def region (bit address 21))
+    (def data-offset (bit address 3))
+    (def ack-offset (bit address 4)))
+
+  ;; 反転の有無で遅延が変わるため、時間をそろえた信号を別々に受け取る。
+  (func mmio-address-select
+    (in extra-bit missing-region data-offset ack-offset no-data-offset no-ack-offset)
+    (out status-selected data-selected ack-selected)
+    (def common (nor missing-region extra-bit))
+    (def status-position (nor data-offset ack-offset))
+    (def data-position (nor no-data-offset ack-offset))
+    (def ack-position (nor data-offset no-ack-offset))
+    (def status-selected (mmio-and common status-position))
+    (def data-selected (mmio-and common data-position))
+    (def ack-selected (mmio-and common ack-position)))
+
+  ;; オペランドから計算したアドレスが確定したときの、MMIO レジスタの選択。
+  (func uart-mmio-address
+    (in (address (bits 64))) (out status data ack)
+    (def (extra-bit region data-offset ack-offset) (mmio-address-bits address))
+    (def missing-region (nor region region))
+    (def no-data-offset (nor data-offset data-offset))
+    (def no-ack-offset (nor ack-offset ack-offset))
+    (def (status data ack)
+      (mmio-address-select extra-bit missing-region
+                           data-offset ack-offset no-data-offset no-ack-offset)))
+
   ;; 入力tick t のアドレスと write-enable を対応付け、ACK を t+17 に返す。
   ;; read-data はアドレス t、受信状態 t+15 の結果を t+19 に返す。
   ;; STATUS の下位2bitと ready、error は同じ受信状態を観測する。
@@ -132,28 +169,16 @@
     (in (address (bits 64)) write-enable (word (bits 64)) buffer-ready buffer-error)
     (out (read-data (bits 64)) ready error ack)
 
-    ;; 0x200000, 0x200008, 0x200010 はビット21だけが共通の1。ビット3と4で端子を選ぶ。
-    (def low (slice address 0 3))
-    (def middle (slice address 5 16))
-    (def high (slice address 22 42))
-    (def common-bits (concat low #b00 middle #b0 high))
-    (def extra-bit (mmio-any-64 common-bits))
-    (def region (bit address 21))
-    (def data-offset (bit address 3))
-    (def ack-offset (bit address 4))
+    (def (extra-bit region data-offset ack-offset) (mmio-address-bits address))
     (def (region-earlier region-latest) (mmio-address-delay region))
     (def (data-earlier data-latest) (mmio-address-delay data-offset))
     (def (ack-earlier ack-latest) (mmio-address-delay ack-offset))
     (def missing-region (nor region-earlier region-earlier))
-    (def common (nor missing-region extra-bit))
     (def no-data-offset (nor data-earlier data-earlier))
     (def no-ack-offset (nor ack-earlier ack-earlier))
-    (def status-position (nor data-latest ack-latest))
-    (def data-position (nor no-data-offset ack-latest))
-    (def ack-position (nor data-latest no-ack-offset))
-    (def status-selected (mmio-and common status-position))
-    (def data-selected (mmio-and common data-position))
-    (def ack-selected (mmio-and common ack-position))
+    (def (status-selected data-selected ack-selected)
+      (mmio-address-select extra-bit missing-region
+                           data-latest ack-latest no-data-offset no-ack-offset))
 
     ;; アドレスの判定が確定する段まで書き込みを遅らせ、別tickのアドレスを混ぜない。
     (def write-tail (slice write-delay 0 14))

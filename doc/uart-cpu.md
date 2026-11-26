@@ -17,9 +17,23 @@
 
 RAM の語に対する応答時間はバスアドレスの確定から57 tick 以内とする。PC のビット2で語の下位32ビットか上位32ビットを選ぶ。ROM や範囲外をフェッチする期間にも PC に対応するアドレスを外部に送る。外部回路は読み出し自体に副作用を持たせず、`bus-write` に合わせて同じフレームの `bus-address` と `bus-write-data` を取り込む。RAM は同じ語の書き込みと読み出しが重なれば更新前の値を返す。[NCG2 の状態素子と read-first](https://neknaj.github.io/circuitgame2/docs/simulation.html)
 
+## MMIO のアクセス幅
+
+UART の語レジスタは表に示す命令と物理アドレスの組み合わせでアクセスできる。
+
+| レジスタ | アドレス | 命令 |
+| --- | --- | --- |
+| STATUS | `0x200000` | `LD` |
+| DATA | `0x200008` | `LD` |
+| ACK | `0x200010` | `SD` |
+
+語内の一部にアクセスするロードとストアは RAM に限る。MMIO のアドレスに1〜7を加えた位置や、表にない命令でアクセスした場合は、命令を無効とし、レジスタとメモリへの書き込みを抑止する。[UART の語レジスタ](uart-boot-mmio.md)
+
 ## 検証
 
 SMT 検証器はPC の変換と RAM フェッチの実 NOR を展開する。64ビットの加減算、フェッチ可能な範囲と整列、語内の選択を独立したビットベクトル式と照合する。既存の命令実行部と組み合わせ、`AUIPC`・`JAL`・`JALR` の物理アドレスでの結果と、飛び先が4バイト境界を外れた場合の挙動も照合する。
+
+命令全体の検証器は旧2プロファイルと UART プロファイルをそれぞれ展開する。有効判定、次の PC、レジスタやメモリへの書き込み要求を、プロファイルごとの独立したアドレス仕様と照合する。UART では LD と SD の許可と、部分アクセスや別アドレスから ACK を消費できないことも照合する。
 
 VM のテストはブート ROM に UART の受信語を供給し、書き込んだ実 RAM からアプリを実行する。同じ語を更新する tick では更新前の値を確認し、アプリに移ったあとは連続した PC とレジスタ書き込み値を照合する。テスト用の UART は語インターフェースで代用し、RAM は先頭の4語を扱う。
 
@@ -27,6 +41,10 @@ VM のテストはブート ROM に UART の受信語を供給し、書き込ん
 host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
 cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
   --target "$host" --example verify_uart_pc | z3 -in
+for profile in firmware-dispatch firmware-dispatch-core firmware-dispatch-uart; do
+  cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
+    --target "$host" --bin ncg2-rv64-arithmetic-proof -- "$profile" | z3 -in
+done
 cargo +1.99.1 test --locked --manifest-path verification/Cargo.toml \
   --target "$host" --test uart_entry
 ```

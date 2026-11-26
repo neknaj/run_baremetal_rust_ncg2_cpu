@@ -5,8 +5,9 @@ use circuitgame2_core::netlist::{NorNetlist, Wire};
 use super::{name, vector};
 
 /// 命令、フェッチの成否、オペランド、メモリと乗算の結果を独立した入力として比較する。
-pub(super) fn emit_dispatch(outputs: &[Wire], core_profile: bool) {
+pub(super) fn emit_dispatch(outputs: &[Wire], core_profile: bool, uart_profile: bool) {
     println!("(define-fun core-profile () Bool {core_profile})");
+    println!("(define-fun uart-profile () Bool {uart_profile})");
     for (port, start, stop) in [
         ("instruction", 0, 32),
         ("pc", 32, 96),
@@ -170,7 +171,8 @@ fn emit_banks(outputs: &[Wire], banks: &[(u64, u64, usize, usize)], rotated_bank
         let extent = 1_u64 << word_bits;
         let expected = if rotated_bank == Some(bank) {
             println!("(declare-const other-address (_ BitVec 64))");
-            let other_word = format!("(bvurem (bvudiv other-address (_ bv8 64)) (_ bv{extent} 64))");
+            let other_word =
+                format!("(bvurem (bvudiv other-address (_ bv8 64)) (_ bv{extent} 64))");
             differences.push(format!(
                 "(and bank-{bank} (bvuge other-address (_ bv{start} 64)) (bvult other-address (_ bv{stop} 64)) (distinct address other-address) (= (bvurem other-address (_ bv8 64)) (_ bv0 64)) (= ((_ zero_extend {}) {word}) {other_word}))",
                 64 - word_bits,

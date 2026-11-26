@@ -1,0 +1,27 @@
+(namespace rv64
+  (export firmware-data-access)
+
+  (func uart-ram-writable (in (address (bits 64))) (out writable)
+    (def (program tail mailbox stack program-word tail-word mailbox-word stack-word)
+      (uart-ram-map address))
+    (def executable (execute-or program tail))
+    (def working (execute-or mailbox stack))
+    (def writable (execute-or executable working)))
+
+  ;; LD は RAM と UART の STATUS/DATA を読む。部分更新の許可は RAM の範囲を示す。
+  (func firmware-data-access (in (address (bits 64))) (out readable writable)
+    (def writable (uart-ram-writable address))
+    (def (status data ack) (uart-mmio-address address))
+    (def mmio-readable (execute-or status data))
+    (def readable (execute-or writable mmio-readable)))
+
+  ;; ACK は確定した SD の書き込みだけで消費する。SB/SH/SW はこの入口を使わない。
+  (func firmware-full-store-access (in (address (bits 64))) (out writable)
+    (def ram (uart-ram-writable address))
+    (def (status data ack) (uart-mmio-address address))
+    (def writable (execute-or ram ack)))
+
+  ;; 部分アクセスの語アドレスは切り下げてあるため、MMIO を許可すると別のバイトが別名になる。
+  (func firmware-subword-access (in (address (bits 64))) (out readable writable)
+    (def readable (uart-ram-writable address))
+    (def writable readable)))
