@@ -1,0 +1,118 @@
+(namespace rv64
+  (export execute-boot)
+
+  (func execute-and (in a b) (out result)
+    (def not-a (nor a a))
+    (def not-b (nor b b))
+    (def result (nor not-a not-b)))
+
+  (func execute-or (in a b) (out result)
+    (def neither (nor a b))
+    (def result (nor neither neither)))
+
+  (func execute-zero-3 (in (value (bits 3))) (out zero)
+    (def low (bit value 0))
+    (def middle (bit value 1))
+    (def high (bit value 2))
+    (def lower-set (execute-or low middle))
+    (def zero (nor lower-set high)))
+
+  (func execute-zero-6 (in (value (bits 6))) (out zero)
+    (def low (slice value 0 3))
+    (def high (slice value 3 3))
+    (def low-zero (execute-zero-3 low))
+    (def high-zero (execute-zero-3 high))
+    (def zero (execute-and low-zero high-zero)))
+
+  (func execute-zero-7 (in (value (bits 7))) (out zero)
+    (def low (slice value 0 6))
+    (def high (bit value 6))
+    (def low-zero (execute-zero-6 low))
+    (def low-set (nor low-zero low-zero))
+    (def zero (nor low-set high)))
+
+  ;; 起動 ROM の命令を実行し、次の PC 相対位置と書き込みを返す。
+  ;; valid が0なら PC を保持し、レジスタと RAM への書き込みを抑止する。
+  (func execute-boot
+    (in
+      (instruction (bits 32)) (pc-offset (bits 64))
+      (rs1-value (bits 64)) (rs2-value (bits 64)))
+    (out
+      valid (next-offset (bits 64))
+      (register-index (bits 5)) (register-data (bits 64)) register-write
+      (store-address (bits 64)) (store-data (bits 64)) store-write)
+    (def (opcode register-index funct3 rs1-index rs2-index funct7
+          immediate-i immediate-s immediate-b immediate-u immediate-j)
+      (decode instruction))
+
+    ;; 固定値と異なるビットだけを立て、全ビットが一致する命令を選ぶ。
+    (def op0 (bit opcode 0))
+    (def op1 (bit opcode 1))
+    (def op2 (bit opcode 2))
+    (def op3 (bit opcode 3))
+    (def op4 (bit opcode 4))
+    (def op5 (bit opcode 5))
+    (def op6 (bit opcode 6))
+    (def not-op0 (nor op0 op0))
+    (def not-op1 (nor op1 op1))
+    (def not-op2 (nor op2 op2))
+    (def not-op3 (nor op3 op3))
+    (def not-op4 (nor op4 op4))
+    (def not-op5 (nor op5 op5))
+    (def not-op6 (nor op6 op6))
+    (def diff-op-imm (concat not-op0 not-op1 op2 op3 not-op4 op5 op6))
+    (def diff-lui (concat not-op0 not-op1 not-op2 op3 not-op4 not-op5 op6))
+    (def diff-store (concat not-op0 not-op1 op2 op3 op4 not-op5 op6))
+    (def diff-jal (concat not-op0 not-op1 not-op2 not-op3 op4 not-op5 not-op6))
+    (def is-op-imm (execute-zero-7 diff-op-imm))
+    (def is-lui (execute-zero-7 diff-lui))
+    (def is-store (execute-zero-7 diff-store))
+    (def is-jal (execute-zero-7 diff-jal))
+
+    (def funct-low (bit funct3 0))
+    (def funct-middle (bit funct3 1))
+    (def funct-high (bit funct3 2))
+    (def not-funct-low (nor funct-low funct-low))
+    (def not-funct-middle (nor funct-middle funct-middle))
+    (def funct-addi (execute-zero-3 funct3))
+    (def diff-funct-slli (concat not-funct-low funct-middle funct-high))
+    (def diff-funct-sd (concat not-funct-low not-funct-middle funct-high))
+    (def funct-slli (execute-zero-3 diff-funct-slli))
+    (def funct-sd (execute-zero-3 diff-funct-sd))
+    ;; instruction[25] は shamt の最上位ビット。26～31だけを検査する。
+    (def slli-upper (slice funct7 1 6))
+    (def slli-upper-zero (execute-zero-6 slli-upper))
+    (def slli-fields (execute-and funct-slli slli-upper-zero))
+    (def is-addi (execute-and is-op-imm funct-addi))
+    (def is-slli (execute-and is-op-imm slli-fields))
+    (def is-sd (execute-and is-store funct-sd))
+
+    ;; ADDI と SD の加算は同時に使わないので、即値を切り替えて加算器を共用する。
+    (def operand (::rv64::arithmetic::select is-sd immediate-i immediate-s))
+    (def store-address (::rv64::arithmetic::add rs1-value operand))
+    (def store-data rs2-value)
+    (def store-low (slice store-address 0 3))
+    (def store-aligned (execute-zero-3 store-low))
+    (def store-write (execute-and is-sd store-aligned))
+
+    ;; PC は 0x10000 を起点とした相対値で保持する。JAL のリンク値には起点を加える。
+    (def four #x0000000000000004)
+    (def link-base #x0000000000010004)
+    (def pc-delta (::rv64::arithmetic::select is-jal four immediate-j))
+    (def candidate-offset (::rv64::arithmetic::add pc-offset pc-delta))
+    (def link-value (::rv64::arithmetic::add pc-offset link-base))
+    (def target-low (bit candidate-offset 0))
+    (def target-middle (bit candidate-offset 1))
+    (def target-aligned (nor target-low target-middle))
+    (def valid-jal (execute-and is-jal target-aligned))
+
+    (def shamt (slice immediate-i 0 6))
+    (def shifted (::rv64::arithmetic::shift-left rs1-value shamt))
+    (def alu-value (::rv64::arithmetic::select is-slli store-address shifted))
+    (def upper-value (::rv64::arithmetic::select is-lui alu-value immediate-u))
+    (def register-data (::rv64::arithmetic::select is-jal upper-value link-value))
+    (def write-imm (execute-or is-addi is-slli))
+    (def write-other (execute-or is-lui valid-jal))
+    (def register-write (execute-or write-imm write-other))
+    (def valid (execute-or register-write store-write))
+    (def next-offset (::rv64::arithmetic::select valid pc-offset candidate-offset))))
