@@ -1,6 +1,7 @@
 //! 入力や状態が変わった素子だけを、同期回路の tick に従って再評価する。
 
 use circuitgame2_core::netlist::{ClockedVm, TickInputError, Wire};
+use ncg2_event_queue::EvaluationQueue;
 use std::ops::Range;
 
 #[derive(Clone, Copy)]
@@ -60,8 +61,8 @@ pub struct EventVm {
     values: Vec<bool>,
     // 素子の添字に続けて公開出力の添字を割り当てる。
     users: Vec<Vec<usize>>,
-    queued: Vec<bool>,
-    queue: Vec<usize>,
+    dependent_nodes: Vec<usize>,
+    queue: EvaluationQueue,
     changes: Vec<(usize, bool)>,
     ram_writes: Vec<(usize, usize)>,
     write_data: Vec<bool>,
@@ -155,14 +156,13 @@ impl EventVm {
                 }
             }
         }
+        let dependent_nodes = users.iter().map(Vec::len).collect();
         let mut reset_output = Vec::with_capacity(net.outputs.len());
         for (index, &wire) in net.outputs.iter().enumerate() {
             pin(wire).connect(&mut users, nodes + index);
             reset_output.push(wire == Wire::Constant(true));
         }
         let output = reset_output.clone();
-        let mut queue = Vec::with_capacity(nodes);
-        queue.extend(0..nodes);
         Ok(Self {
             external,
             augmented,
@@ -170,8 +170,8 @@ impl EventVm {
             storage,
             values: vec![false; slots],
             users,
-            queued: vec![true; nodes],
-            queue,
+            dependent_nodes,
+            queue: EvaluationQueue::new_all(nodes),
             changes: Vec::with_capacity(slots),
             ram_writes: Vec::with_capacity(vm.storage_count()),
             write_data: vec![false; augmented],
@@ -189,9 +189,7 @@ impl EventVm {
                 ram.bits.fill(false);
             }
         }
-        self.queued.fill(true);
-        self.queue.clear();
-        self.queue.extend(0..self.queued.len());
+        self.queue.reset_all();
         self.output.copy_from_slice(&self.reset_output);
         self.evaluated = 0;
         &self.output
@@ -211,7 +209,7 @@ impl EventVm {
 
     /// 毎 tick 全体を走査する場合に訪れる NOR と状態素子の数。
     pub fn node_count(&self) -> usize {
-        self.queued.len()
+        self.queue.node_count()
     }
 
     /// 直近の成功した tick で評価した素子の数。reset の直後は0。
@@ -234,10 +232,8 @@ impl EventVm {
             self.publish(slot, value);
         }
 
-        self.evaluated = self.queue.len();
-        for item in 0..self.evaluated {
-            let node = self.queue[item];
-            self.queued[node] = false;
+        self.evaluated = self.queue.pending_count();
+        while let Some(node) = self.queue.pop() {
             if node < self.gates.len() {
                 let (left, right) = self.gates[node];
                 let value = !(left.read(&self.values) || right.read(&self.values));
@@ -249,7 +245,6 @@ impl EventVm {
                 self.evaluate_storage(node - self.gates.len());
             }
         }
-        self.queue.clear();
 
         // ここから登録出力を確定する。依存先は次の tick で再評価する。
         for i in 0..self.changes.len() {
@@ -265,10 +260,7 @@ impl EventVm {
 
             // 同じ入力のままでも、次の read-first 読み出しは新しい語を読む。
             let node = self.gates.len() + index;
-            if !self.queued[node] {
-                self.queued[node] = true;
-                self.queue.push(node);
-            }
+            self.queue.insert(node);
         }
         self.ram_writes.clear();
         Ok(&self.output)
@@ -279,14 +271,11 @@ impl EventVm {
             return;
         }
         self.values[slot] = value;
-        let nodes = self.queued.len();
-        for &target in &self.users[slot] {
-            if target >= nodes {
-                self.output[target - nodes] = value;
-            } else if !self.queued[target] {
-                self.queued[target] = true;
-                self.queue.push(target);
-            }
+        let (nodes, outputs) = self.users[slot].split_at(self.dependent_nodes[slot]);
+        self.queue.insert_all(nodes);
+        let base = self.queue.node_count();
+        for &target in outputs {
+            self.output[target - base] = value;
         }
     }
 

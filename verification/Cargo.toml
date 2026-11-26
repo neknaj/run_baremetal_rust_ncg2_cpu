@@ -5,7 +5,12 @@ edition = "2024"
 publish = false
 default-run = "ncg2-rv64-arithmetic-proof"
 
+[workspace]
+members = ["event-queue"]
+resolver = "3"
+
 [dependencies]
+ncg2-event-queue = { path = "event-queue" }
 circuitgame2-core = { git = "https://github.com/neknaj/circuitgame2-core.git", rev = "7ce39f6465390e64c023a63f1f89b9d0fba0c426" }
 
 [dev-dependencies]

@@ -18,10 +18,18 @@ reset では内部状態、RAM、外部入力を0に戻し、初回の候補に�
 
 ある素子の入力配線が変われば、外部入力なら同じ tick、状態素子や NOR の出力なら次の tick で候補になる。候補にない NOR は前の評価と同じ入力から同じ出力を得る。同じ許可とデータを受け取るラッチには、前の tick の保持または代入を繰り返しても変化がない。RAM ではアドレスが変わらず書き換えもなければ、同じ語を登録し、同じ内容を保つ。書き換えがあった RAM は次の候補に入るため、古い読み出し値が残らない。したがって候補の評価と確定は、全素子を毎 tick 評価した結果と同じになる。公開出力は確定した状態とその tick の入力から求める。[NCG2 の tick と状態素子](https://neknaj.github.io/circuitgame2/docs/simulation.html)
 
-この不変条件は更新順序を説明するためのもので、Rust のキュー操作や配列境界まで機械検証するには実装を Verus の契約につなぐ必要がある。現在は検証ツール専用の実行器として、小回路の公開フレームと RAM の全記憶内容、起動 ELF を実行した各 tick の公開フレームと最終 RAM を Core の標準 VM と比較する。
+## 実装の検証範囲
+
+外部入力や登録出力の変化を処理する `EventVm` は、逆引き表にある依存素子の一覧を `EvaluationQueue::insert_all` に渡す。書き換えた RAM は `insert` で再登録する。通常の Rust ビルドも、Verus が検査するキューの実装を使う。
+
+キューは登録ビットと候補一覧が同じ素子集合を表し、一覧に重複がないことを保証する。一括登録後の集合は、登録前の集合に範囲内の入力候補を加えた集合に等しい。`pop` は登録した末尾の素子を一つだけ除き、reset は全素子を登録する。この契約は、逆引き表が欠落なく作られていれば、表から渡した全素子を再評価できることを示す。
+
+逆引き表が Core の配線と一致すること、評価対象外の NOR・ラッチ・RAM の参照遷移が状態を保存すること、確定後の状態が Core の tick 契約と一致することは、今後それぞれ実装に結び付けて検証する。現在は小回路の公開フレームと RAM の全記憶内容、起動 ELF を実行した各 tick の公開フレームと最終 RAM を Core の標準 VM と比較する。
 
 ```sh
 host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+CARGO_BUILD_TARGET="$host" cargo +1.99.1 verus focus --locked \
+  --manifest-path verification/Cargo.toml -p ncg2-event-queue -- --no-cheating
 cargo +1.99.1 test --locked --release --manifest-path verification/Cargo.toml \
   --target "$host" --test event_clocked --test firmware_machine
 ```

@@ -83,11 +83,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "ncg2-event-queue"
+version = "0.1.0"
+dependencies = [
+ "vstd",
+]
+
+[[package]]
 name = "ncg2-rv64-arithmetic-proof"
 version = "0.1.0"
 dependencies = [
  "circuitgame2-core",
  "circuitgame2-project-config",
+ "ncg2-event-queue",
 ]
 
 [[package]]
