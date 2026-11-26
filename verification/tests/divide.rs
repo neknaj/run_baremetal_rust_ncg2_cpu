@@ -134,9 +134,6 @@ fn firmware_divider_captures_modes_and_finishes_with_the_corrected_result() {
     let mut vm = divider("firmware-divide.ncg2", "firmware-divide");
     let mut input = [false; 132];
     vm.reset();
-    for _ in 0..8 {
-        assert!(!vm.step(&input).unwrap()[64]);
-    }
     let cases = [
         ((-11i64) as u64, 3, true, false, false, (-3i64) as u64),
         ((-11i64) as u64, 3, true, false, true, (-2i64) as u64),
@@ -161,7 +158,9 @@ fn firmware_divider_captures_modes_and_finishes_with_the_corrected_result() {
             0xffff_ffff_8000_0000,
         ),
     ];
-    for (left, right, signed, word_mode, remainder, expected) in cases {
+    for (index, (left, right, signed, word_mode, remainder, expected)) in
+        cases.into_iter().enumerate()
+    {
         input[0] = true;
         for index in 0..64 {
             input[1 + index] = left >> index & 1 != 0;
@@ -171,6 +170,7 @@ fn firmware_divider_captures_modes_and_finishes_with_the_corrected_result() {
         assert!(!vm.step(&input).unwrap()[64]);
         // 開始後は外部オペランドとモードを変更しても捕捉済みの値で演算する。
         input.fill(false);
+        input[129..].copy_from_slice(&[!signed, !word_mode, !remainder]);
         for elapsed in 1..=34_184 {
             let output = vm.step(&input).unwrap();
             assert_eq!(output[64], elapsed == 34_184, "開始から {elapsed} tick");
@@ -178,7 +178,8 @@ fn firmware_divider_captures_modes_and_finishes_with_the_corrected_result() {
                 assert_eq!(word(&output[..64]), expected);
             }
         }
-        for _ in 0..8 {
+        // 最初の完了の次の tick には、待機なしで次の要求を渡す。
+        for _ in 0..if index == 0 { 0 } else { 8 } {
             let output = vm.step(&input).unwrap();
             assert!(!output[64]);
             assert_eq!(word(&output[..64]), expected);
