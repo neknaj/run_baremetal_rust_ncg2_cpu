@@ -1,8 +1,11 @@
 //! 反復除算の開始、完了、結果の保持を順序回路 VM で調べる。
 
-use circuitgame2_core::project::{
-    ClockedModuleVmLimits, ModuleBodyPosition, SourceSnapshot, check_use_aliases,
-    index_use_targets, parse_circuit_project,
+use circuitgame2_core::{
+    netlist::ClockedVm,
+    project::{
+        ClockedModuleVmLimits, ModuleBodyPosition, SourceSnapshot, check_use_aliases,
+        index_use_targets, parse_circuit_project,
+    },
 };
 
 const SOURCES: &[(&str, &str)] = &[
@@ -12,6 +15,22 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../circuit/arithmetic.ncg2"),
     ),
     ("divide.ncg2", include_str!("../../circuit/divide.ncg2")),
+    (
+        "divide-operands.ncg2",
+        include_str!("../../circuit/divide-operands.ncg2"),
+    ),
+    (
+        "execute-boot.ncg2",
+        include_str!("../../circuit/execute-boot.ncg2"),
+    ),
+    (
+        "boot-machine.ncg2",
+        include_str!("../../circuit/boot-machine.ncg2"),
+    ),
+    (
+        "firmware-divide.ncg2",
+        include_str!("../../circuit/firmware-divide.ncg2"),
+    ),
 ];
 
 fn word(bits: &[bool]) -> u64 {
@@ -21,8 +40,7 @@ fn word(bits: &[bool]) -> u64 {
         .sum()
 }
 
-#[test]
-fn divides_on_the_last_capture_and_holds_until_reinitialized() {
+fn divider(path: &str, entry_name: &str) -> ClockedVm {
     let snapshots: Vec<_> = SOURCES
         .iter()
         .map(|&(path, text)| SourceSnapshot {
@@ -34,12 +52,12 @@ fn divides_on_the_last_capture_and_holds_until_reinitialized() {
     let project = parse_circuit_project(&snapshots).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
-    let file = SOURCES.len() - 1;
+    let file = SOURCES.iter().position(|&(name, _)| name == path).unwrap();
     let circuit = &project.circuits()[file];
     let declaration = circuit
         .names
         .iter()
-        .find(|name| name.name.word == "div-wide")
+        .find(|name| name.name.word == entry_name)
         .unwrap();
     let entry = circuit
         .syntax
@@ -53,11 +71,16 @@ fn divides_on_the_last_capture_and_holds_until_reinitialized() {
         gates: 1_048_576,
         state_bits: 1_048_576,
     };
-    let mut vm = aliases
+    aliases
         .lower_clocked_vm(ModuleBodyPosition { file, entry }, limits)
         .unwrap()
         .unwrap()
-        .vm;
+        .vm
+}
+
+#[test]
+fn divides_on_the_last_capture_and_holds_until_reinitialized() {
+    let mut vm = divider("divide.ncg2", "div-wide");
     assert_eq!(vm.reset(), [false; 129]);
     let mut input = [false; 130];
     let mut was_done = false;
@@ -103,5 +126,62 @@ fn divides_on_the_last_capture_and_holds_until_reinitialized() {
         let output = vm.step(&input).unwrap();
         assert_eq!((word(&output[..64]), word(&output[64..128])), expected);
         assert!(output[128]);
+    }
+}
+
+#[test]
+fn firmware_divider_captures_modes_and_finishes_with_the_corrected_result() {
+    let mut vm = divider("firmware-divide.ncg2", "firmware-divide");
+    let mut input = [false; 132];
+    vm.reset();
+    for _ in 0..8 {
+        assert!(!vm.step(&input).unwrap()[64]);
+    }
+    let cases = [
+        ((-11i64) as u64, 3, true, false, false, (-3i64) as u64),
+        ((-11i64) as u64, 3, true, false, true, (-2i64) as u64),
+        (u64::MAX, 3, false, false, false, u64::MAX / 3),
+        (u64::MAX - 1, 3, false, false, true, 2),
+        (
+            0x1234_5678_8000_0000,
+            u64::MAX,
+            true,
+            true,
+            false,
+            0xffff_ffff_8000_0000,
+        ),
+        (0x1234_5678_ffff_fff5, 3, true, true, true, (-2i64) as u64),
+        (0x1234_5678_ffff_ffff, 1, false, true, false, u64::MAX),
+        (
+            0x1234_5678_8000_0000,
+            0x8765_4321_0000_0000,
+            false,
+            true,
+            true,
+            0xffff_ffff_8000_0000,
+        ),
+    ];
+    for (left, right, signed, word_mode, remainder, expected) in cases {
+        input[0] = true;
+        for index in 0..64 {
+            input[1 + index] = left >> index & 1 != 0;
+            input[65 + index] = right >> index & 1 != 0;
+        }
+        input[129..].copy_from_slice(&[signed, word_mode, remainder]);
+        assert!(!vm.step(&input).unwrap()[64]);
+        // 開始後は外部オペランドとモードを変更しても捕捉済みの値で演算する。
+        input.fill(false);
+        for elapsed in 1..=34_184 {
+            let output = vm.step(&input).unwrap();
+            assert_eq!(output[64], elapsed == 34_184, "開始から {elapsed} tick");
+            if elapsed == 34_184 {
+                assert_eq!(word(&output[..64]), expected);
+            }
+        }
+        for _ in 0..8 {
+            let output = vm.step(&input).unwrap();
+            assert!(!output[64]);
+            assert_eq!(word(&output[..64]), expected);
+        }
     }
 }
