@@ -1,0 +1,23 @@
+(namespace rv64
+  (export uart-boot-fetch)
+
+  ;; 物理 PC が0x0から0x7fまでの4バイト境界にあるときに命令を選ぶ。
+  ;; ROM 内の未使用領域は0で埋め、命令として実行したときは既存の不正命令経路に入る。
+  (func uart-boot-fetch
+    (in (pc (bits 64))) (out (instruction (bits 32)) valid)
+    (def word-index (slice pc 3 4))
+    (def high-half (bit pc 2))
+    (def word (uart-boot-rom word-index))
+    (def low (slice word 0 32))
+    (def high (slice word 32 32))
+    (def zero #x00000000)
+    (def low-packed (concat low zero))
+    (def high-packed (concat high zero))
+    (def selected (::rv64::arithmetic::select high-half low-packed high-packed))
+    (def instruction (slice selected 0 32))
+    (def alignment (slice pc 0 2))
+    (def outside (slice pc 7 57))
+    (def padding #b00000)
+    (def tested (concat alignment outside padding))
+    (def invalid (any-bit-64 tested))
+    (def valid (nor invalid invalid))))
