@@ -139,7 +139,7 @@ cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
 
 上の33,778語を送った Windows の release 計測では、最後の RAM 書き込みが tick 43,237,191、CPU への引き渡しが tick 43,237,192 だった。送信開始から全語の RAM 照合までに16.216秒かかった。8 tick/bit では引き渡しは tick 21,618,640 で、RAM 照合までに12.471秒と13.325秒を計測した。回路の構築と引き渡し後の実行は別に計測する。連続転送で表示するアプリの tick 数は RAM を引き渡した時点から数える。[計測条件と比較](https://github.com/neknaj/run_baremetal_rust_ncg2_cpu/wiki/UART-performance)
 
-16 tick/bit の連続転送で起動したアプリも停止まで実行した。RAM の引き渡しから58,593,618 tick で、QEMU の退役 PC 50,924件と終了状態 `0x1`、情報 `0x2b800113` が一致した。この完走には入力一致による通知省略を入れる前の実行器を使った。
+16 tick/bit と8 tick/bit の両方で全量を送り、入力の一致を検査する実行器でアプリが停止するまで実行した。RAM の引き渡しから停止まではともに58,593,618 tick だった。退役 PC 50,924件と終了状態 `0x1`、情報 `0x2b800113` は、両周期とも QEMU と一致した。
 
 CPU・RAM 回路の先頭1,600 tick と、受信器の先頭5,120 tick（8 tick/bit では2,560 tick）では公開出力を標準 VM と毎 tick 照合する。以降は疎実行器で進め、受信語、RAM に確定した内容、CPU への引き渡しを検査する。FIFO の契約と切り替え回路の有界 SMT 検査は、この全量走行の検査と併用する。
 
