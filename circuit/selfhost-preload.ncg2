@@ -1,0 +1,103 @@
+(namespace rv64
+  (export selfhost-preloaded-memory)
+
+  (latch selfhost-request-index (width 5))
+
+  ;; 起動要求の18語を、低位バイトから並べる。最初の2語は長さと NOR 入力。
+  ;; ソースは "(using nor)" と改行に続く "(func invert (in a) (out b) (def b (nor a a)))"。
+  (func selfhost-request-word
+    (in (index (bits 5))) (out (address (bits 64)) (data (bits 64)) (next-index (bits 5)) active)
+    (def i0 (bit index 0))
+    (def i1 (bit index 1))
+    (def i2 (bit index 2))
+    (def i3 (bit index 3))
+    (def i4 (bit index 4))
+    (def low-zero #b000)
+    (def base #x000000000002bf)
+    (def address (concat low-zero index base))
+    (def word-0 #x000000000000003a)
+    (def word-1 #x0000000000000000)
+    (def word-2 #x6e20676e69737528)
+    (def word-3 #x6e7566280a29726f)
+    (def word-4 #x747265766e692063)
+    (def word-5 #x202961206e692820)
+    (def word-6 #x2029622074756f28)
+    (def word-7 #x2820622066656428)
+    (def word-8 #x2961206120726f6e)
+    (def word-9 #x0000000000002929)
+    (def part-0-0 (::rv64::arithmetic::select i0 word-0 word-1))
+    (def part-0-1 (::rv64::arithmetic::select i0 word-2 word-3))
+    (def part-0-2 (::rv64::arithmetic::select i0 word-4 word-5))
+    (def part-0-3 (::rv64::arithmetic::select i0 word-6 word-7))
+    (def part-0-4 (::rv64::arithmetic::select i0 word-8 word-9))
+    (def part-1-0 (::rv64::arithmetic::select i1 part-0-0 part-0-1))
+    (def part-1-1 (::rv64::arithmetic::select i1 part-0-2 part-0-3))
+    (def part-1-2 (::rv64::arithmetic::select i1 part-0-4 word-1))
+    (def part-2-0 (::rv64::arithmetic::select i2 part-1-0 part-1-1))
+    (def part-2-1 (::rv64::arithmetic::select i2 part-1-2 word-1))
+    (def part-3-0 (::rv64::arithmetic::select i3 part-2-0 part-2-1))
+    (def data (::rv64::arithmetic::select i4 part-3-0 word-1))
+
+    ;; 添字を取り込む経路の段数をそろえ、15から16に移るときも停止しない。
+    ;; i4 が1で、i1～i3 のいずれかが1になる18以降で書き込みを止める。
+    (def middle (slice index 1 3))
+    (def lower (concat middle 0))
+    (def lower-set (any-bit-4 lower))
+    (def high-after-2 (execute-or i4 i4))
+    (def high-after-4 (execute-or high-after-2 high-after-2))
+    (def full (execute-and high-after-4 lower-set))
+    (def active (nor full full))
+    (def advanced-0 (nor i0 i0))
+    (def advanced-1 (execute-xor-bit i1 i0))
+    (def carry-2 (execute-and i0 i1))
+    (def advanced-2 (execute-xor-bit i2 carry-2))
+    (def carry-3 (execute-and i2 carry-2))
+    (def advanced-3 (execute-xor-bit i3 carry-3))
+    (def carry-4 (execute-and i3 carry-3))
+    (def advanced-4 (execute-xor-bit i4 carry-4))
+    (def next-index (concat advanced-0 advanced-1 advanced-2 advanced-3 advanced-4)))
+
+  ;; リセット後に一度だけ要求を送り、最後の書き込みが確定してから finished を立てる。
+  (module selfhost-preload
+    (in) (out (address (bits 64)) (data (bits 64)) write finished)
+    ;; 1に変わる信号を1段の反転と2段の遅延へ分け、1 tick の開始パルスを作る。
+    (def warmed (delay-32 1))
+    (def not-warmed (nor warmed warmed))
+    (def warmed-later (delay-2 warmed))
+    (def first (nor not-warmed warmed-later))
+    (def start (accept-pulse first 1))
+    (def later (delay-32 write))
+    (def due (execute-or start later))
+    (def (address data next-index active) (selfhost-request-word index))
+    (def write (accept-pulse due active))
+    (def index (selfhost-request-index next-index write))
+
+    ;; 次の添字が18になってから32 tick 以上待つ。
+    (def inactive (nor active active))
+    (def stable (delay-16 1))
+    (def drained (accept-pulse inactive stable))
+    (def finished (delay-32 drained)))
+
+  ;; 選択と書き込み可否を4段にそろえ、アドレス・値・許可を同じフレームから取る。
+  (func selfhost-route-request
+    (in (cpu-address (bits 64)) (cpu-data (bits 64)) cpu-write
+        (load-address (bits 64)) (load-data (bits 64)) load-write finished ready)
+    (out (bus-address (bits 64)) (bus-data (bits 64)) bus-write)
+    (def bus-address (::rv64::arithmetic::select finished load-address cpu-address))
+    (def bus-data (::rv64::arithmetic::select finished load-data cpu-data))
+    (def loading (nor finished finished))
+    (def accept-load (execute-and loading load-write))
+    (def accept-cpu (execute-and ready cpu-write))
+    (def bus-write (execute-or accept-load accept-cpu)))
+
+  ;; ロード中は CPU の要求を受け付けない。ready の前にアドレスとデータの選択を切り替える。
+  ;; 各入力フレームは選択と許可の4 NOR 段を通ってから、同一の RAM へ届く。
+  (module selfhost-preloaded-memory
+    (in (address (bits 64)) (write-data (bits 64)) write)
+    (out (read-data (bits 64)) readable writable ready)
+    (def (request-address request-data request-write finished) (selfhost-preload))
+    (def ready (delay-8 finished))
+    (def (bus-address bus-data bus-write)
+      (selfhost-route-request address write-data write
+                             request-address request-data request-write finished ready))
+    (def (read-data readable writable) (firmware-data-memory bus-address bus-data bus-write))))
