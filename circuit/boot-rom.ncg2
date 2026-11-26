@@ -1,0 +1,67 @@
+(namespace rv64
+  (export boot-rom)
+
+  ;; 起動アドレスからの32ビット命令語の添字を受け取り、命令語と有効ビットを返す。
+  ;; 0～5 は次の命令を順に返す。6 と 7 では命令語と有効ビットがともに0になる。
+  ;;
+  ;;   0  00100293  addi t0, zero, 1
+  ;;   1  02029293  slli t0, t0, 32
+  ;;   2  00328293  addi t0, t0, 3
+  ;;   3  00030337  lui  t1, 0x30
+  ;;   4  fe533c23  sd   t0, -8(t1)
+  ;;   5  0000006f  jal  zero, 0
+  (func boot-rom
+    (in (address (bits 3)))
+    (out (instruction (bits 32)) valid)
+    (def a0 (bit address 0))
+    (def a1 (bit address 1))
+    (def a2 (bit address 2))
+    (def not-a0 (nor a0 a0))
+    (def not-a1 (nor a1 a1))
+    (def not-a2 (nor a2 a2))
+
+    ;; 下位2ビットを共用し、対応する有効アドレスだけを選ぶ。
+    (def low-0 (nor a1 a0))
+    (def low-1 (nor a1 not-a0))
+    (def low-2 (nor not-a1 a0))
+    (def low-3 (nor not-a1 not-a0))
+    (def not-low-0 (nor low-0 low-0))
+    (def not-low-1 (nor low-1 low-1))
+    (def not-low-2 (nor low-2 low-2))
+    (def not-low-3 (nor low-3 low-3))
+    (def at-0 (nor a2 not-low-0))
+    (def at-1 (nor a2 not-low-1))
+    (def at-2 (nor a2 not-low-2))
+    (def at-3 (nor a2 not-low-3))
+    (def at-4 (nor not-a2 not-low-0))
+    (def at-5 (nor not-a2 not-low-1))
+    (def invalid (nor not-a2 not-a1))
+    (def valid (nor invalid invalid))
+
+    ;; 同じアドレスの組で1になるビットは、同じ配線を参照する。
+    (def neither-3-5 (nor at-3 at-5))
+    (def at-3-5 (nor neither-3-5 neither-3-5))
+    (def neither-3-4 (nor at-3 at-4))
+    (def at-3-4 (nor neither-3-4 neither-3-4))
+    (def none-3-4-5 (nor at-3-4 at-5))
+    (def at-3-4-5 (nor none-3-4-5 none-3-4-5))
+    (def neither-1-2 (nor at-1 at-2))
+    (def at-1-2 (nor neither-1-2 neither-1-2))
+    (def none-0-1-2 (nor at-0 at-1-2))
+    (def at-0-1-2 (nor none-0-1-2 none-0-1-2))
+    (def neither-1-4 (nor at-1 at-4))
+    (def at-1-4 (nor neither-1-4 neither-1-4))
+    (def none-1-2-3-4 (nor at-1-2 at-3-4))
+    (def at-1-2-3-4 (nor none-1-2-3-4 none-1-2-3-4))
+    (def neither-0-2 (nor at-0 at-2))
+    (def at-0-2 (nor neither-0-2 neither-0-2))
+    (def none-0-2-4 (nor at-0-2 at-4))
+    (def at-0-2-4 (nor none-0-2-4 none-0-2-4))
+    (def zero 0)
+
+    ;; concat は低いインデックスの引数から並べる。
+    (def byte-0 (concat valid valid at-3-5 at-5 not-a2 at-3-4-5 at-5 at-0-1-2))
+    (def byte-1 (concat at-3 not-a2 at-4 at-4 at-1-4 at-4 zero at-1-2))
+    (def byte-2 (concat at-3-4 at-1-2-3-4 zero zero at-0-2-4 at-2 at-4 zero))
+    (def byte-3 (concat zero at-1-4 at-4 at-4 at-4 at-4 at-4 at-4))
+    (def instruction (concat byte-0 byte-1 byte-2 byte-3))))
