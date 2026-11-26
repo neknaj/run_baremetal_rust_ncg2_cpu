@@ -72,6 +72,39 @@ pub open spec fn round_at(first: int, tick: int, round: int) -> bool {
     round >= 0 && tick == first + 518 * round
 }
 
+/// 取り込み後のマークと完了フラグを、乗算を初期化する取り込みを0回目として表す。
+pub open spec fn sampled_round_mark(
+    mark: spec_fn(int, int) -> bool,
+    done: spec_fn(int) -> bool,
+) -> bool {
+    &&& !done(0)
+    &&& forall|bit: int| 0 <= bit < 64 ==> #[trigger] mark(0, bit) == (bit == 0)
+    &&& forall|k: int, bit: int| 0 <= k < 64 && 0 <= bit < 64 ==>
+        #[trigger] mark(k + 1, bit) == (bit > 0 && mark(k, bit - 1))
+    &&& forall|k: int| 0 <= k < 64 ==> #[trigger] done(k + 1) == (done(k) || mark(k, 63))
+}
+
+/// オペランドに関わらず、初期化後の64回目の取り込みで初めて完了フラグが立つ。
+pub proof fn round_mark_finishes_at_sixty_four(
+    mark: spec_fn(int, int) -> bool,
+    done: spec_fn(int) -> bool,
+    round: int,
+)
+    requires sampled_round_mark(mark, done), 0 <= round <= 64,
+    ensures
+        forall|bit: int| 0 <= bit < 64 ==> #[trigger] mark(round, bit) == (bit == round),
+        done(round) == (round == 64),
+    decreases round,
+{
+    if round > 0 {
+        round_mark_finishes_at_sixty_four(mark, done, round - 1);
+        assert forall|bit: int| 0 <= bit < 64 implies #[trigger] mark(round, bit) == (bit == round) by {
+            assert(mark((round - 1) + 1, bit) == (bit > 0 && mark(round - 1, bit - 1)));
+        }
+        assert(done((round - 1) + 1) == (done(round - 1) || mark(round - 1, 63)));
+    }
+}
+
 /// リセットから初回の開始要求が効く直前まで、取り込みがなく完了フラグは0のままになる。
 pub proof fn reset_multiply_has_no_pending_captures(
     start: spec_fn(int) -> bool,

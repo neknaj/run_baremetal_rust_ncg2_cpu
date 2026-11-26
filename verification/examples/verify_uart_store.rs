@@ -205,6 +205,58 @@ fn writer_inputs(vm: &ClockedVm, wire: Wire) -> Check<(Wire, Wire)> {
     Ok((retire, qualified))
 }
 
+/// 完了を決める64ビットのマークに、積やオペランドの値が入らないことを調べる。
+fn verify_multiplier_round_marker(vm: &ClockedVm, done: Wire, running: Wire) -> Check<()> {
+    let net = vm.netlist();
+    let (done_latch, _) = latch(vm, done, 1)?;
+    let [initialize, unfinished] =
+        nor_inputs(net, done_latch.data[0]).ok_or("乗算の次の完了値が NOR でない。")?;
+    let last = nor_inputs(net, unfinished)
+        .and_then(|inputs| other_input(inputs, done))
+        .ok_or("乗算完了が完了フラグと最終マークを参照していない。")?;
+    let (mark, bits) = latch(vm, last, 64)?;
+    if inverted_input(net, initialize) != Some(running)
+        || last != Wire::Input(bits.end - 1)
+        || mark.enable != done_latch.enable
+    {
+        return Err("ラウンドマークと完了フラグの保持または初期化の配線が異なる。".into());
+    }
+    for (bit, &next) in mark.data.iter().enumerate() {
+        let shifted = if bit == 0 {
+            Wire::Constant(false)
+        } else {
+            Wire::Input(bits.start + bit - 1)
+        };
+        let seeded = Wire::Constant(bit == 0);
+        let [set, advance] = or_inputs(net, next).ok_or("次のラウンドマークが選択回路でない。")?;
+        if and_inputs(net, set) != Some([initialize, seeded])
+            || and_inputs(net, advance) != Some([running, shifted])
+        {
+            return Err(
+                format!("ラウンドマークのビット{bit}の初期化またはシフトが異なる。").into(),
+            );
+        }
+    }
+    let roots: Vec<_> = mark
+        .data
+        .iter()
+        .copied()
+        .chain(done_latch.data.iter().copied())
+        .collect();
+    let cone = depths(net, &roots, &[])?;
+    let Wire::Input(running_index) = running else {
+        return Err("乗算の実行状態がラッチ出力でない。".into());
+    };
+    require_bound(
+        &cone,
+        running_index..running_index + 1,
+        5,
+        "実行状態から次のマークと完了値",
+    )?;
+    require_bound(&cone, bits, 4, "マークから次のマークと完了値")?;
+    Ok(())
+}
+
 /// フェッチとオペランドの取り込み、通常書き込みの遅延を同じ issue 配線へ結び付ける。
 fn verify_instruction_controls(
     vm: &ClockedVm,
@@ -291,6 +343,7 @@ fn verify_instruction_controls(
     if delay_source(vm, older_done, 2)? != done {
         return Err("乗算完了の立ち上がりが同じ done の2 tick 遅延を比較していない。".into());
     }
+    verify_multiplier_round_marker(vm, done, running)?;
     let (done_latch, _) = latch(vm, done, 1)?;
     let capture = done_latch.enable;
     let (capture_latch, _) = latch(vm, capture, 1)?;
