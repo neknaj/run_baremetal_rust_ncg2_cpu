@@ -17,6 +17,7 @@ sources = [
     "circuit/subword-memory.ncg2",
     "circuit/execute-subword.ncg2",
     "circuit/firmware-dispatch.ncg2",
+    "circuit/firmware-engine.ncg2",
     "circuit/firmware-machine.ncg2",
     "circuit/firmware-demo.ncg2",
 ]

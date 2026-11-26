@@ -111,7 +111,7 @@
   (module instruction-window
     (in restart (instruction (bits 32)) (destination (bits 5))
         (write-data (bits 64)) register-enable)
-    (out (first-value (bits 64)) (second-value (bits 64)) ready)
+    (out (first-value (bits 64)) (second-value (bits 64)) ready issue)
     (def initialized (delay-1 1))
     (def started (delay-2 1))
     (def seed (nor initialized initialized))
@@ -148,7 +148,7 @@
          (probe-response (bits 11)) commit stopped)
     (def pc-offset (program-counter next-offset commit))
     (def (instruction fetch-valid) (fetch-boot pc-offset))
-    (def (first-value second-value retire)
+    (def (first-value second-value retire issue)
       (instruction-window commit instruction destination write-data register-enable))
 
     (def (execute-valid next-offset destination write-data write-register

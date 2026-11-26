@@ -86,8 +86,8 @@ fn lower(controller: Controller) -> Result<ClockedVm, Box<dyn Error>> {
             include_str!("../../../circuit/boot-machine.ncg2"),
         ),
         (
-            "firmware-machine.ncg2",
-            include_str!("../../../circuit/firmware-machine.ncg2"),
+            "firmware-engine.ncg2",
+            include_str!("../../../circuit/firmware-engine.ncg2"),
         ),
     ];
     let snapshots = sources.map(|(path, text)| SourceSnapshot {

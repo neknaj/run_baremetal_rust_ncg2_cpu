@@ -1,0 +1,21 @@
+(namespace rv64
+  ;; 既存の実行部を物理 PC で呼ぶ場合の、参照仕様との照合入口。
+  (func prove-uart-pc
+    (in (pc (bits 64)) (instruction (bits 32)) (rs1 (bits 64)) (word (bits 64)))
+    (out (offset (bits 64)) (round-trip (bits 64)) (next (bits 64))
+         (register (bits 64)) valid write-register (word-address (bits 64)) fetch-valid
+         (fetched (bits 32)))
+    (def offset (::rv64::arithmetic::uart-pc-offset pc))
+    (def round-trip (::rv64::arithmetic::uart-absolute-pc offset))
+    (def zero #x0000000000000000)
+    (def (basic basic-next basic-rd basic-data basic-write store-address store-data store-write)
+      (execute-boot instruction offset rs1 zero))
+    (def (control control-valid control-next control-rd control-data control-write)
+      (execute-control instruction offset rs1 zero))
+    (def next-offset (::rv64::arithmetic::select control basic-next control-next))
+    (def next (::rv64::arithmetic::uart-absolute-pc next-offset))
+    (def register (::rv64::arithmetic::select control basic-data control-data))
+    (def valid (index-bit control control-valid basic))
+    (def write-register (index-bit control control-write basic-write))
+    (def (word-address fetch-valid high-half) (uart-app-fetch-address pc))
+    (def fetched (uart-instruction-from-word high-half word))))

@@ -1,0 +1,64 @@
+(namespace rv64
+  (export uart-firmware-machine)
+  (latch uart-fetched-instruction (width 33))
+
+  ;; 命令のある64ビット語を指し、4バイト境界にあるアプリの PC だけを受け付ける。
+  (func uart-app-fetch-address
+    (in (pc (bits 64))) (out (word-address (bits 64)) valid high-half)
+    (def beginning #x0000000000010000)
+    (def end #x0000000000052000)
+    (def in-range (in-address-range pc beginning end))
+    (def low-bits (slice pc 0 2))
+    (def misalignment (any-bit-2 low-bits))
+    (def aligned (nor misalignment misalignment))
+    (def valid (execute-and in-range aligned))
+    (def zero #b000)
+    (def word-index (slice pc 3 61))
+    (def word-address (concat zero word-index))
+    (def high-half (bit pc 2)))
+
+  (func uart-select-instruction
+    (in from-second (first (bits 32)) (second (bits 32))) (out (instruction (bits 32)))
+    (def zero #x00000000)
+    (def lower (concat first zero))
+    (def upper (concat second zero))
+    (def selection (::rv64::arithmetic::select from-second lower upper))
+    (def instruction (slice selection 0 32)))
+
+  (func uart-instruction-from-word
+    (in high-half (word (bits 64))) (out (instruction (bits 32)))
+    (def low (slice word 0 32))
+    (def high (slice word 32 32))
+    (def instruction (uart-select-instruction high-half low high)))
+
+  ;; リセット時の物理 PC は0。commit の次の tick に更新先の PC が現れる。
+  ;; read-data には bus-address に対する read-first の応答を与える。
+  ;; RAM からの応答は issue の64 tick 後までに確定させ、8段の選択後に命令を取り込む。
+  ;; 取り込んだ命令は次のフェッチまで保持する。
+  (module uart-firmware-machine
+    (in (probe-address (bits 64)) (read-data (bits 64)))
+    (out (pc (bits 64)) (bus-address (bits 64)) (bus-write-data (bits 64)) bus-write
+         (register-data (bits 64)) register-enable commit stopped)
+    (def pc (program-counter next-pc commit))
+    (def pc-offset (::rv64::arithmetic::uart-pc-offset pc))
+    (def (boot-instruction boot-valid) (uart-boot-fetch pc))
+    (def (app-address app-valid high-half) (uart-app-fetch-address pc))
+
+    (def capture-window (delay-64 issue))
+    (def capture (delay-8 capture-window))
+    (def fetch-phase (phase-mode issue capture))
+    (def bus-address (::rv64::arithmetic::select fetch-phase data-address app-address))
+    (def bus-write memory-write)
+
+    (def app-instruction (uart-instruction-from-word high-half read-data))
+    (def selected-instruction (uart-select-instruction app-valid boot-instruction app-instruction))
+    (def available (execute-or boot-valid app-valid))
+    (def selected-frame (concat selected-instruction available))
+    (def fetched (uart-fetched-instruction selected-frame capture))
+    (def instruction (slice fetched 0 32))
+    (def instruction-valid (bit fetched 32))
+
+    (def (issue next-offset data-address bus-write-data register-data register-enable
+          memory-write commit stopped)
+      (firmware-engine pc-offset instruction instruction-valid read-data probe-address))
+    (def next-pc (::rv64::arithmetic::uart-absolute-pc next-offset))))

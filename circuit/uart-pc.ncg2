@@ -1,0 +1,43 @@
+(namespace rv64::arithmetic
+  (export uart-pc-offset uart-absolute-pc)
+
+  ;; 各16ビット区間の加算を並行して行い、下位の区間から桁が上がる結果だけを選ぶ。
+  (func uart-pc-upper-plus-one
+    (in (low (bits 16)) (middle (bits 16)) (high (bits 16)))
+    (out (result (bits 48)))
+    (def zero #x0000)
+    (def (low-carry low-next) (add-16 low zero 1))
+    (def (middle-carry middle-next) (add-16 middle zero 1))
+    (def (high-carry high-next) (add-16 high zero 1))
+    (def high-enable (alu-and low-carry middle-carry))
+    (def result-middle (select-16 low-carry middle middle-next))
+    (def result-high (select-16 high-enable high high-next))
+    (def result (concat low-next result-middle result-high)))
+
+  ;; 物理 PC と既存実行部の相対 PC は 0x10000 を基点として対応する。
+  ;; 下位16ビットを保持し、上位48ビットの加減算は 2^48 を法とする。
+  (func uart-absolute-pc (in (offset (bits 64))) (out (pc (bits 64)))
+    (def lower (slice offset 0 16))
+    (def low (slice offset 16 16))
+    (def middle (slice offset 32 16))
+    (def high (slice offset 48 16))
+    (def upper (uart-pc-upper-plus-one low middle high))
+    (def pc (concat lower upper)))
+
+  (func uart-pc-offset (in (pc (bits 64))) (out (offset (bits 64)))
+    (def lower (slice pc 0 16))
+    (def low (slice pc 16 16))
+    (def middle (slice pc 32 16))
+    (def high (slice pc 48 16))
+    (def invert-low (alu-nor-16 low low))
+    (def invert-middle (alu-nor-16 middle middle))
+    (def invert-high (alu-nor-16 high high))
+    ;; 反転、加算、反転の順に 1 を引く。
+    (def increment (uart-pc-upper-plus-one invert-low invert-middle invert-high))
+    (def next-low (slice increment 0 16))
+    (def next-middle (slice increment 16 16))
+    (def next-high (slice increment 32 16))
+    (def result-low (alu-nor-16 next-low next-low))
+    (def result-middle (alu-nor-16 next-middle next-middle))
+    (def result-high (alu-nor-16 next-high next-high))
+    (def offset (concat lower result-low result-middle result-high))))

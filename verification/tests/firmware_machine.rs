@@ -27,6 +27,7 @@ fn machine(rom_override: Option<&str>) -> ClockedVm {
         "subword-memory",
         "execute-subword",
         "firmware-dispatch",
+        "firmware-engine",
         "firmware-machine",
     ];
     let sources: Vec<_> = sources

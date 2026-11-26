@@ -1,65 +1,16 @@
 (namespace rv64
   (export firmware-machine)
 
-  ;; 乗算の初期化を1回行い、実回路の最大460段を越える間隔で更新する。
-  ;; done は乗算器に残るため、実行中に立ち上がったときだけ完了として扱う。
-  (module firmware-multiply
-    (in start (left (bits 64)) (right (bits 64)) high-half)
-    (out (product (bits 64)) finished)
-    (def armed (delay-2 1))
-    (def initialized (delay-8 start))
-    (def running (phase-mode initialized finished))
-    (def initialize (nor running running))
-    (def no-done (nor done done))
-    (def not-yet (execute-and running no-done))
-    (def request (delay-512 capture))
-    (def repeat (accept-pulse request not-yet))
-    (def either (execute-or start repeat))
-    (def capture (phase-bit either armed))
-    (def (low high done) (::rv64::arithmetic::mul-wide left right initialize capture))
-    (def product (::rv64::arithmetic::select high-half low high))
-    (def older-done (delay-2 done))
-    (def rising (nor no-done older-done))
-    (def finished (accept-pulse rising running)))
-
-  ;; 乗算を待たない命令または乗算器から完了通知を受け、更新要求を出す。
-  ;; 完了から更新要求までの tick と、起動時の抑止条件は doc/retire-control.md に従う。
-  (module firmware-retire
-    (in simple multiply-finished valid write-register write-memory)
-    (out commit register-enable memory-write)
-    (def raw-retire (execute-or simple multiply-finished))
-    (def armed (delay-2 1))
-    (def retire (phase-bit raw-retire armed))
-    (def commit (accept-pulse retire valid))
-    (def register-enable (accept-pulse retire write-register))
-    (def memory-write (accept-pulse retire write-memory)))
-
   ;; 同じアドレス空間から命令とデータを読む。入力は実行を制御せず、RAM の観測先だけを指定する。
   ;; commit のフレームの PC は完了した命令を指す。次 tick に PC が更新される。
-  ;; load または store の間は、その命令がデータポートを使う。
   (module firmware-machine
     (in (probe-address (bits 64)))
     (out (pc-offset (bits 64)) (probe-data (bits 64)) (memory-address (bits 64))
          (register-data (bits 64)) register-enable memory-write commit stopped)
     (def pc-offset (program-counter next-offset commit))
     (def (instruction fetch-valid) (firmware-fetch pc-offset))
-    (def (first-value second-value ready)
-      (instruction-window commit instruction rd register-data register-enable))
-
-    (def (valid multiply next-offset rd register-data write-register memory-address
-          store-data write-memory high-product)
-      (firmware-dispatch instruction pc-offset first-value second-value
-                         probe-data product fetch-valid probe-address))
     (def (probe-data readable writable)
       (firmware-cpu-memory memory-address store-data memory-write))
-
-    (def invalid (nor valid valid))
-    (def failure (accept-pulse ready invalid))
-    (def stopped (phase-bit 1 failure))
-    (def mul-request (execute-and valid multiply))
-    (def mul-start (accept-pulse ready mul-request))
-    (def (product mul-finished) (firmware-multiply mul-start first-value second-value high-product))
-    (def not-multiply (nor multiply multiply))
-    (def simple (accept-pulse ready not-multiply))
-    (def (commit register-enable memory-write)
-      (firmware-retire simple mul-finished valid write-register write-memory))))
+    (def (issue next-offset memory-address store-data register-data register-enable
+          memory-write commit stopped)
+      (firmware-engine pc-offset instruction fetch-valid probe-data probe-address))))
