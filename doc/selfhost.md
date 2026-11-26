@@ -139,7 +139,37 @@ cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
 
 上の33,778語を送った Windows の release 計測では、最後の RAM 書き込みが tick 43,237,191、CPU への引き渡しが tick 43,237,192 だった。送信開始から全語の RAM 照合までに16.216秒かかった。8 tick/bit では引き渡しは tick 21,618,640 で、RAM 照合までに12.471秒と13.325秒を計測した。回路の構築と引き渡し後の実行は別に計測する。連続転送で表示するアプリの tick 数は RAM を引き渡した時点から数える。[計測条件と比較](https://github.com/neknaj/run_baremetal_rust_ncg2_cpu/wiki/UART-performance)
 
+16 tick/bit と8 tick/bit の両方で全量を送り、入力の一致を検査する実行器でアプリが停止するまで実行した。RAM の引き渡しから停止まではともに58,593,618 tick だった。退役 PC 50,924件と終了状態 `0x1`、情報 `0x2b800113` は、両周期とも QEMU と一致した。
+
 CPU・RAM 回路の先頭1,600 tick と、受信器の先頭5,120 tick（8 tick/bit では2,560 tick）では公開出力を標準 VM と毎 tick 照合する。以降は疎実行器で進め、受信語、RAM に確定した内容、CPU への引き渡しを検査する。FIFO の契約と切り替え回路の有界 SMT 検査は、この全量走行の検査と併用する。
+
+### 受信からRAMの書き込みまでNCG2で実行する
+
+`uart-circuit-loader.toml` は、8 tick/bit の8N1受信器、語の待機枠、RAM 書き込み制御、CPU への切り替えを一つの NCG2 回路にまとめる。検証器は各語を物理 RAM で照合し、CPU に引き渡すまで命令の発行と退役がないことを確認する。起動後は退役 PC と結果2語を QEMU と照合する。最初の1,600 tick は公開出力を標準 VM と照合し、残りは疎実行器で進める。
+
+同じ `compile-uart.bin` と `compile-qemu.log` を使う。
+
+```sh
+host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
+  --target "$host" --example verify_uart_selfhost -- --circuit-loader uart-circuit-loader.toml \
+  selfhost/target/compile-uart.bin selfhost/target/compile-qemu.log 2b800113 600000000
+```
+
+転送だけを測るには実行ファイルを `--measure-circuit-loader uart-circuit-loader.toml selfhost/target/compile-uart.bin 33778` で起動する。最後の語数を減らすと先頭区間だけを送る。ヘッダーには元の全語数が入るので、この場合は CPU への引き渡しまで進まない。
+
+2026年11月27日（日本時間）の WSL 上の Linux release ビルドでは、33,778語すべてを RAM で照合した。アプリは `boot_halt`（`0x10068`）に達し、検証器は終了コード0を返した。
+
+| 照合したもの | 結果 |
+|---|---:|
+| UART 波形の送信を終えた tick | 21,618,576 |
+| 最後の語を物理 RAM で確認した tick | 21,618,659 |
+| CPU へ引き渡した tick | 21,618,678 |
+| 送信開始から引き渡しまでの実時間 | 34.130秒 |
+| 引き渡しからアプリが停止するまで | 58,593,618 tick（800.557秒） |
+| 一致した退役 PC の個数 | 50,924 |
+| 終了状態 | `0x1` |
+| 情報 | `0x2b800113` |
 
 ### 回路ソースと入力を指定する
 
