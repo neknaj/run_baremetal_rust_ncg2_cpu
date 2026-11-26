@@ -1,6 +1,6 @@
 //! 実 UART CPU の書き込み配線を調べ、時刻付きのアドレス照合を SMT-LIB に出力する。
 
-use circuitgame2_core::netlist::{ClockedVm, NorNetlist, Wire};
+use circuitgame2_core::netlist::{ClockedStorageInputs, ClockedVm, NorNetlist, Wire};
 use std::{
     collections::HashSet,
     error::Error,
@@ -89,17 +89,61 @@ fn depths(net: &NorNetlist, roots: &[Wire], read_data: &[Wire]) -> Check<Cone> {
     })
 }
 
-fn latch_range(vm: &ClockedVm, wire: Wire, width: usize) -> Check<Range<usize>> {
+fn latch(vm: &ClockedVm, wire: Wire, width: usize) -> Check<(&ClockedStorageInputs, Range<usize>)> {
     let Wire::Input(index) = wire else {
         return Err("観測した状態が入力配線でない。".into());
     };
     (0..vm.storage_count())
         .filter_map(|slot| vm.storage_wiring(slot))
-        .find_map(|(storage, range)| {
-            (storage.address.is_none() && range.len() == width && range.contains(&index))
-                .then_some(range)
+        .find(|(storage, range)| {
+            storage.address.is_none() && range.len() == width && range.contains(&index)
         })
         .ok_or_else(|| format!("期待する {width} ビットのラッチが見つからない。").into())
+}
+
+fn latch_range(vm: &ClockedVm, wire: Wire, width: usize) -> Check<Range<usize>> {
+    Ok(latch(vm, wire, width)?.1)
+}
+
+/// リセット後の常時許可ラッチを順にたどり、指定 tick 数だけ前の信号を得る。
+fn delay_source(vm: &ClockedVm, mut wire: Wire, ticks: usize) -> Check<Wire> {
+    for _ in 0..ticks {
+        let (delay, _) = latch(vm, wire, 1)?;
+        if delay.enable != Wire::Constant(true) {
+            return Err("時刻を決める遅延ラッチが常時許可でない。".into());
+        }
+        wire = delay.data[0];
+    }
+    Ok(wire)
+}
+
+fn nor_inputs(net: &NorNetlist, wire: Wire) -> Option<[Wire; 2]> {
+    match wire {
+        Wire::Gate(index) => net.gates.get(index).map(|gate| [gate.left, gate.right]),
+        _ => None,
+    }
+}
+
+fn inverted_input(net: &NorNetlist, wire: Wire) -> Option<Wire> {
+    let [left, right] = nor_inputs(net, wire)?;
+    (left == right).then_some(left)
+}
+
+fn and_inputs(net: &NorNetlist, wire: Wire) -> Option<[Wire; 2]> {
+    let [left, right] = nor_inputs(net, wire)?;
+    Some([inverted_input(net, left)?, inverted_input(net, right)?])
+}
+
+fn or_inputs(net: &NorNetlist, wire: Wire) -> Option<[Wire; 2]> {
+    nor_inputs(net, inverted_input(net, wire)?)
+}
+
+fn other_input(inputs: [Wire; 2], known: Wire) -> Option<Wire> {
+    match inputs {
+        [left, right] if left == known && right != known => Some(right),
+        [left, right] if right == known && left != known => Some(left),
+        _ => None,
+    }
 }
 
 fn address_cut(
@@ -149,47 +193,124 @@ fn require_bound(cone: &Cone, range: Range<usize>, bound: usize, label: &str) ->
     Ok(())
 }
 
-fn writer_input(vm: &ClockedVm, wire: Wire) -> Check<Wire> {
+fn writer_inputs(vm: &ClockedVm, wire: Wire) -> Check<(Wire, Wire)> {
     let net = vm.netlist();
-    let range = latch_range(vm, wire, 1)?;
-    let writer = (0..vm.storage_count())
-        .filter_map(|slot| vm.storage_wiring(slot))
-        .find(|(_, output)| *output == range)
-        .ok_or("bus-write のラッチがない。")?
-        .0;
-    let Wire::Gate(and) = writer.data[0] else {
-        return Err("書き込み要求の AND がない。".into());
-    };
-    let negated = |wire| {
-        let Wire::Gate(index) = wire else {
-            return None;
-        };
-        let gate = net.gates[index];
-        (gate.left == gate.right).then_some(gate.left)
-    };
-    let gate = net.gates[and];
-    let (Some(retire), Some(qualified)) = (negated(gate.left), negated(gate.right)) else {
-        return Err("書き込み要求が退役と許可の論理積でない。".into());
-    };
-    latch_range(vm, retire, 1)?;
+    let (writer, _) = latch(vm, wire, 1)?;
+    let [retire, qualified] =
+        and_inputs(net, writer.data[0]).ok_or("書き込み要求が退役と許可の論理積でない。")?;
     // 書き込みパルスを記録するラッチの許可は、reset から4 tick 経過後に1を保持する。
-    let mut enable = writer.enable;
-    for _ in 0..4 {
-        let range = latch_range(vm, enable, 1)?;
-        let delay = (0..vm.storage_count())
-            .filter_map(|slot| vm.storage_wiring(slot))
-            .find(|(_, output)| *output == range)
-            .ok_or("書き込み許可の初期化ラッチがない。")?
-            .0;
-        if delay.enable != Wire::Constant(true) {
-            return Err("書き込み許可の初期化は定数を遅延させる。".into());
-        }
-        enable = delay.data[0];
-    }
-    if enable != Wire::Constant(true) {
+    if delay_source(vm, writer.enable, 4)? != Wire::Constant(true) {
         return Err("書き込み許可の初期化が4 tick の遅延と異なる。".into());
     }
-    Ok(qualified)
+    Ok((retire, qualified))
+}
+
+/// フェッチとオペランドの取り込み、通常書き込みの遅延を同じ issue 配線へ結び付ける。
+fn verify_instruction_controls(
+    vm: &ClockedVm,
+    pc: usize,
+    instruction: usize,
+    first: usize,
+    second: usize,
+    fetch: usize,
+    retire: Wire,
+) -> Check<()> {
+    let net = vm.netlist();
+    let (instruction_latch, instruction_range) = latch(vm, Wire::Input(instruction), 33)?;
+    let capture = instruction_latch.enable;
+    let issue = delay_source(vm, capture, 72)?;
+
+    let (pc_latch, _) = latch(vm, Wire::Input(pc), 64)?;
+    let commit = net.outputs[194];
+    let (commit_retire, valid) = writer_inputs(vm, commit)?;
+    let (issue_latch, _) = latch(vm, issue, 1)?;
+    let started = delay_source(vm, issue_latch.enable, 2)?;
+    let issue_pulses = or_inputs(net, issue_latch.data[0]).ok_or("命令枠の開始が OR でない。")?;
+    let seed = issue_pulses
+        .iter()
+        .copied()
+        .find(|&wire| wire != commit)
+        .and_then(|wire| inverted_input(net, wire))
+        .ok_or("命令枠の初期パルスがない。")?;
+    if pc_latch.enable != commit
+        || commit_retire != retire
+        || started != Wire::Constant(true)
+        || !issue_pulses.contains(&commit)
+        || delay_source(vm, seed, 1)? != Wire::Constant(true)
+    {
+        return Err("PC の保持または初期・次回の命令開始回路が異なる。".into());
+    }
+
+    let (first_latch, _) = latch(vm, Wire::Input(first), 64)?;
+    let (second_latch, _) = latch(vm, Wire::Input(second), 64)?;
+    if delay_source(vm, first_latch.enable, 96)? != issue
+        || delay_source(vm, second_latch.enable, 144)? != issue
+        || first_latch.data != second_latch.data
+    {
+        return Err("オペランドの取り込み時刻またはレジスタの読み出し配線が異なる。".into());
+    }
+
+    let (mode, _) = latch(vm, Wire::Input(fetch), 1)?;
+    let mode_control = or_inputs(net, mode.enable).ok_or("フェッチ選択の許可が OR でない。")?;
+    if !mode_control.contains(&issue)
+        || !mode_control.contains(&capture)
+        || delay_source(vm, mode.data[0], 2)? != issue
+    {
+        return Err("フェッチ選択の開始または解除時刻を決める配線が異なる。".into());
+    }
+
+    let (retire_latch, _) = latch(vm, retire, 1)?;
+    let [simple, mul_finished] =
+        or_inputs(net, retire_latch.data[0]).ok_or("退役要求が OR でない。")?;
+    if delay_source(vm, retire_latch.enable, 2)? != Wire::Constant(true) {
+        return Err("退役ラッチの初期化時刻が異なる。".into());
+    }
+    let (simple_latch, _) = latch(vm, simple, 1)?;
+    let [ready, not_multiply] =
+        and_inputs(net, simple_latch.data[0]).ok_or("通常退役要求が AND でない。")?;
+    if delay_source(vm, simple_latch.enable, 4)? != Wire::Constant(true)
+        || delay_source(vm, ready, 1024)? != issue
+    {
+        return Err("通常退役が同じ issue の1024 tick 後を起点とする経路を特定できない。".into());
+    }
+    let (finished, _) = latch(vm, mul_finished, 1)?;
+    let [_, running] = and_inputs(net, finished.data[0]).ok_or("乗算完了通知が AND でない。")?;
+    let (run, _) = latch(vm, running, 1)?;
+    let initialized = delay_source(vm, run.data[0], 2)?;
+    if or_inputs(net, run.enable).and_then(|inputs| other_input(inputs, mul_finished))
+        != Some(initialized)
+        || delay_source(vm, finished.enable, 4)? != Wire::Constant(true)
+    {
+        return Err("乗算の開始と完了通知の接続が異なる。".into());
+    }
+    let start = delay_source(vm, initialized, 8)?;
+    let (start_latch, _) = latch(vm, start, 1)?;
+    let mul_request = and_inputs(net, start_latch.data[0])
+        .and_then(|inputs| other_input(inputs, ready))
+        .ok_or("通常退役と乗算で ready を共有していない。")?;
+    let multiply = and_inputs(net, mul_request)
+        .and_then(|inputs| other_input(inputs, valid))
+        .ok_or("乗算の開始要求が commit と同じ命令有効信号を使っていない。")?;
+    if delay_source(vm, start_latch.enable, 4)? != Wire::Constant(true)
+        || inverted_input(net, not_multiply) != Some(multiply)
+    {
+        return Err("通常退役と乗算で命令の種類を決める信号が一致しない。".into());
+    }
+    // 2経路の NOR 段数が違うため、同じ命令種別信号を異なる tick に読む。
+    // ready が届く前に信号が確定するよう、取り込み済みの命令だけに依存することを調べる。
+    let multiply_cone = depths(net, &[multiply], &net.outputs[128..192])?;
+    if multiply_cone.read_depth.is_some()
+        || multiply_cone
+            .inputs
+            .iter()
+            .enumerate()
+            .any(|(index, depth)| depth.is_some() && !instruction_range.contains(&index))
+    {
+        return Err("乗算の判定が取り込み済みの命令以外に依存する。".into());
+    }
+    require_bound(&multiply_cone, instruction_range, 14, "命令から乗算の判定")?;
+    eprintln!("issue から命令・第1・第2取込: 73 / 97 / 145 tick、通常の書き込み: 1033 tick");
+    Ok(())
 }
 
 fn verify_paths(
@@ -219,7 +340,7 @@ fn verify_paths(
     }
     require_bound(address, operand.clone(), 465, "rs1 から bus-address")?;
 
-    let permission = writer_input(vm, net.outputs[196])?;
+    let (retire, permission) = writer_inputs(vm, net.outputs[196])?;
     let write = depths(net, &[permission], read)?;
     if write.read_depth.is_some() || write.inputs[..65].iter().any(Option::is_some) {
         return Err("書き込み許可が、ラッチを介さず外部入力またはデータ応答に依存する。".into());
@@ -258,9 +379,10 @@ fn verify_paths(
         }
         second_operand = Some(range);
     }
+    let second_operand = second_operand.ok_or("書き込み許可の rs2 ラッチがない。")?;
     require_bound(
         &write,
-        second_operand.ok_or("書き込み許可の rs2 ラッチがない。")?,
+        second_operand.clone(),
         70,
         "rs2 から dispatch の書き込み許可",
     )?;
@@ -282,6 +404,15 @@ fn verify_paths(
         return Err("データ応答から部分書き込み値への経路が想定外。".into());
     }
     eprintln!("データ応答から部分書き込み値: 8 段");
+    verify_instruction_controls(
+        vm,
+        pc.start,
+        instruction.start,
+        operand.start,
+        second_operand.start,
+        fetch,
+        retire,
+    )?;
     Ok(permission)
 }
 
