@@ -45,12 +45,16 @@ fn depth(wire: Wire, depths: &[usize]) -> usize {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
-    let read = match args.get(1).map(String::as_str) {
-        Some("read-byte") => true,
-        Some("merge-store") => false,
-        _ => return Err("対象の read-byte または merge-store を指定する。".into()),
+    let (declaration, expected_shape, depth_limit) = match args.get(1).map(String::as_str) {
+        Some("read-byte") => ("read-byte", (68, 64), 14),
+        Some("read-halfword") => ("read-halfword", (68, 65), 10),
+        Some("merge-store") => ("merge-store", (134, 65), 28),
+        _ => {
+            return Err(
+                "対象の read-byte、read-halfword、merge-store のいずれかを指定する。".into(),
+            );
+        }
     };
-    let declaration = &args[1];
     let snapshots: Vec<_> = SOURCES
         .iter()
         .map(|&(path, text)| SourceSnapshot {
@@ -85,10 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gates,
         outputs,
     } = built.netlist();
-    assert_eq!(
-        (*input_count, outputs.len()),
-        if read { (68, 64) } else { (134, 65) }
-    );
+    assert_eq!((*input_count, outputs.len()), expected_shape);
 
     println!("(set-logic QF_BV)");
     for index in 0..*input_count {
@@ -105,10 +106,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     emit_vector("word", (0..64).map(Wire::Input));
-    if read {
+    if declaration != "merge-store" {
         emit_vector("offset", (64..67).map(Wire::Input));
-        emit_vector("actual", outputs.iter().copied());
-        print!("{}", include_str!("read_byte.smt2"));
+        if declaration == "read-byte" {
+            emit_vector("actual", outputs.iter().copied());
+            print!("{}", include_str!("read_byte.smt2"));
+        } else {
+            println!("(define-fun aligned () Bool {})", name(outputs[0]));
+            emit_vector("actual", outputs[1..].iter().copied());
+            print!("{}", include_str!("read_halfword.smt2"));
+        }
     } else {
         emit_vector("value", (64..128).map(Wire::Input));
         emit_vector("offset", (128..131).map(Wire::Input));
@@ -124,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|&wire| depth(wire, &depths))
         .max()
         .unwrap();
-    assert!(max_depth <= if read { 14 } else { 28 });
+    assert!(max_depth <= depth_limit);
     eprintln!("{declaration}: {} NORs, depth {max_depth}", gates.len());
     Ok(())
 }

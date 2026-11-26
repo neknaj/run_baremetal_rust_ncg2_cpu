@@ -1,7 +1,7 @@
 (namespace rv64
   (export execute-subword)
 
-  ;; LB/LBU と、自然整列した SB/SH/SW のデータポート要求を作る。
+  ;; LB/LBU、自然整列した LH/LHU と SB/SH/SW のデータポート要求を作る。
   ;; word-before はアドレスを含む語の読み出し値。write-data はその語を部分更新した値。
   (func execute-subword
     (in (instruction (bits 32)) (first-value (bits 64)) (second-value (bits 64))
@@ -25,8 +25,8 @@
     (def f0 (bit funct3 0))
     (def f1 (bit funct3 1))
     (def unsigned (bit funct3 2))
-    (def byte (nor f0 f1))
-    (def load (execute-and read-op byte))
+    (def byte-or-halfword (nor f1 f1))
+    (def load (execute-and read-op byte-or-halfword))
 
     ;; 加算後の下位3ビットは語の中の位置。同じ語を読み出しと書き戻しに使う。
     (def immediate (::rv64::arithmetic::select write-op immediate-i immediate-s))
@@ -36,8 +36,13 @@
     (def zeros #b000)
     (def word-address (concat zeros address-upper))
     (def (readable writable) (firmware-data-access word-address))
-    (def load-valid (execute-and load readable))
-    (def load-data (::rv64::memory::read-byte word-before byte-offset unsigned))
+    (def (aligned-halfword halfword-data) (::rv64::memory::read-halfword word-before byte-offset unsigned))
+    (def byte (nor f0 f0))
+    (def aligned-load (execute-or byte aligned-halfword))
+    (def usable (execute-and aligned-load readable))
+    (def load-valid (execute-and load usable))
+    (def byte-data (::rv64::memory::read-byte word-before byte-offset unsigned))
+    (def load-data (::rv64::arithmetic::select f0 byte-data halfword-data))
     (def (aligned-store write-data)
       (::rv64::memory::merge-store word-before second-value byte-offset funct3))
     (def store (execute-and write-op aligned-store))

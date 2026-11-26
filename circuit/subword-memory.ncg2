@@ -1,5 +1,5 @@
 (namespace rv64::memory
-  (export read-byte merge-store)
+  (export read-byte read-halfword merge-store)
 
   (func select-bit (in choose clear set) (out result)
     (def not-choose (nor choose choose))
@@ -70,6 +70,43 @@
     (def fill-16 (concat fill-8 fill-8))
     (def fill-32 (concat fill-16 fill-16))
     (def value (concat chosen fill-8 fill-16 fill-32)))
+
+  (func select-halfword
+    (in choose (clear (bits 16)) (set (bits 16)))
+    (out (value (bits 16)))
+    (def clear-low (slice clear 0 8))
+    (def clear-high (slice clear 8 8))
+    (def set-low (slice set 0 8))
+    (def set-high (slice set 8 8))
+    (def low (select-byte choose clear-low set-low))
+    (def high (select-byte choose clear-high set-high))
+    (def value (concat low high)))
+
+  ;; 自然整列した16ビットを選び、unsigned が0なら符号拡張する。
+  ;; aligned が0のときは value を使わない。
+  (func read-halfword
+    (in (word (bits 64)) (byte-offset (bits 3)) unsigned)
+    (out aligned (value (bits 64)))
+    (def odd (bit byte-offset 0))
+    (def aligned (nor odd odd))
+    (def mid (bit byte-offset 1))
+    (def hi (bit byte-offset 2))
+    (def lane-0 (slice word 0 16))
+    (def lane-1 (slice word 16 16))
+    (def lane-2 (slice word 32 16))
+    (def lane-3 (slice word 48 16))
+    (def pair-0 (select-halfword mid lane-0 lane-1))
+    (def pair-1 (select-halfword mid lane-2 lane-3))
+    (def chosen (select-halfword hi pair-0 pair-1))
+    (def sign (bit chosen 15))
+    (def nonnegative (nor sign sign))
+    (def extension (nor unsigned nonnegative))
+    (def fill-2 (concat extension extension))
+    (def fill-4 (concat fill-2 fill-2))
+    (def fill-8 (concat fill-4 fill-4))
+    (def fill-16 (concat fill-8 fill-8))
+    (def fill-32 (concat fill-16 fill-16))
+    (def value (concat chosen fill-16 fill-32)))
 
   ;; データを語内のバイト位置に合わせて左へずらす。下位の空いたビットには0を入れる。
   (func align-store-value

@@ -1,0 +1,10 @@
+; 自然整列したオフセットから16ビットを切り出し、命令に従って拡張する。
+(define-fun expected-aligned () Bool (= (bvurem offset #b010) #b000))
+(define-fun shift () (_ BitVec 64)
+  (bvmul ((_ zero_extend 61) offset) (_ bv8 64)))
+(define-fun halfword () (_ BitVec 16)
+  ((_ extract 15 0) (bvlshr word shift)))
+(define-fun expected () (_ BitVec 64)
+  (ite i67 ((_ zero_extend 48) halfword) ((_ sign_extend 48) halfword)))
+(assert (or (distinct aligned expected-aligned)
+            (and expected-aligned (distinct actual expected))))

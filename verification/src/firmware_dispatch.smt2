@@ -42,6 +42,8 @@
 (define-fun sd () Bool (and (= op #b0100011) (= funct3 #b011)))
 (define-fun lb () Bool (and (= op #b0000011) (= funct3 #b000)))
 (define-fun lbu () Bool (and (= op #b0000011) (= funct3 #b100)))
+(define-fun lh () Bool (and (= op #b0000011) (= funct3 #b001)))
+(define-fun lhu () Bool (and (= op #b0000011) (= funct3 #b101)))
 (define-fun sb () Bool (and (= op #b0100011) (= funct3 #b000)))
 (define-fun sh () Bool (and (= op #b0100011) (= funct3 #b001)))
 (define-fun sw () Bool (and (= op #b0100011) (= funct3 #b010)))
@@ -82,6 +84,8 @@
 (define-fun word-address ((address (_ BitVec 64))) (_ BitVec 64)
   (bvand address #xfffffffffffffff8))
 (define-fun load-byte () Bool (or lb lbu))
+(define-fun load-halfword () Bool (or lh lhu))
+(define-fun load-small () Bool (or load-byte load-halfword))
 (define-fun selected-partial () Bool (or sb
     (and sh (= (bvurem store-address (_ bv2 64)) (_ bv0 64)))
     (and sw (= (bvurem store-address (_ bv4 64)) (_ bv0 64)))))
@@ -91,19 +95,22 @@
         (ite core-profile #x0000000000016000 #x0000000000010100))))
 (define-fun load-ok () Bool
   (or (and ld (aligned-word sum-i) (readable sum-i))
-      (and load-byte (readable (word-address sum-i)))))
+      (and load-small (readable (word-address sum-i))
+           (or load-byte (= (bvurem sum-i (_ bv2 64)) (_ bv0 64))))))
 (define-fun store-ok () Bool
   (or (and selected-store (ram store-address))
       (and selected-partial (ram (word-address store-address)))))
 (define-fun memory-address-expected () (_ BitVec 64)
   (ite ld sum-i
-    (ite load-byte (word-address sum-i)
+    (ite load-small (word-address sum-i)
       (ite selected-store store-address
         (ite selected-partial (word-address store-address) probe)))))
 (define-fun byte-shift ((address (_ BitVec 64))) (_ BitVec 64)
   (bvmul (bvurem address (_ bv8 64)) (_ bv8 64)))
 (define-fun read-byte () (_ BitVec 8)
   ((_ extract 7 0) (bvlshr loaded-data (byte-shift sum-i))))
+(define-fun read-halfword () (_ BitVec 16)
+  ((_ extract 15 0) (bvlshr loaded-data (byte-shift sum-i))))
 (define-fun low-mask () (_ BitVec 64)
   (ite sb #x00000000000000ff (ite sh #x000000000000ffff #x00000000ffffffff)))
 (define-fun partial-mask () (_ BitVec 64)
@@ -150,6 +157,8 @@
                      (and ld (distinct register-data loaded-data))
                      (and lb (distinct register-data ((_ sign_extend 56) read-byte)))
                      (and lbu (distinct register-data ((_ zero_extend 56) read-byte)))
+                     (and lh (distinct register-data ((_ sign_extend 48) read-halfword)))
+                     (and lhu (distinct register-data ((_ zero_extend 48) read-halfword)))
                      (and op-xor (distinct register-data (bvxor rs1 rs2)))
                      (and sltu (distinct register-data
                        (ite (bvult rs1 rs2) (_ bv1 64) (_ bv0 64))))
