@@ -1,0 +1,10 @@
+(namespace rv64
+  (export firmware-rom)
+
+  ;; 両方の32ビット区画を区別し、語の正しい添字を観測するためのテスト用 ROM。
+  (func firmware-rom (in (word-index (bits 12))) (out (word (bits 64)))
+    (def low-tag #x12345)
+    (def high-tag #x5678a)
+    (def low (concat word-index low-tag))
+    (def high (concat word-index high-tag))
+    (def word (concat low high))))

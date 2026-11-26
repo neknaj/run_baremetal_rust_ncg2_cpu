@@ -1,0 +1,194 @@
+(namespace rv64
+  (export firmware-fetch firmware-data-access firmware-data-memory)
+
+  (memory selfhost-bss (address 11) (data (bits 64)))
+  (memory selfhost-mailbox (address 5) (data (bits 64)))
+  (memory selfhost-stack (address 11) (data (bits 64)))
+  (latch selfhost-ready-bit (width 1))
+  (latch selfhost-frame (width 129))
+
+  (module selfhost-delay-2 (in (input (bits 129))) (out (output (bits 129)))
+    (def half (selfhost-frame input 1))
+    (def output (selfhost-frame half 1)))
+
+  (module selfhost-delay-4 (in (input (bits 129))) (out (output (bits 129)))
+    (def half (selfhost-delay-2 input))
+    (def output (selfhost-delay-2 half)))
+
+  (module selfhost-delay-8 (in (input (bits 129))) (out (output (bits 129)))
+    (def half (selfhost-delay-4 input))
+    (def output (selfhost-delay-4 half)))
+
+  ;; アドレスをラッチで取り込む tick に反転値がそろうよう、反転には1段だけ使う。
+  (func selfhost-invert-address
+    (in (address (bits 64))) (out (inverted (bits 10)))
+    (def a8 (bit address 8))
+    (def a9 (bit address 9))
+    (def a10 (bit address 10))
+    (def a11 (bit address 11))
+    (def a12 (bit address 12))
+    (def a13 (bit address 13))
+    (def a14 (bit address 14))
+    (def a15 (bit address 15))
+    (def a16 (bit address 16))
+    (def a17 (bit address 17))
+    (def n8 (nor a8 a8))
+    (def n9 (nor a9 a9))
+    (def n10 (nor a10 a10))
+    (def n11 (nor a11 a11))
+    (def n12 (nor a12 a12))
+    (def n13 (nor a13 a13))
+    (def n14 (nor a14 a14))
+    (def n15 (nor a15 a15))
+    (def n16 (nor a16 a16))
+    (def n17 (nor a17 a17))
+    (def inverted (concat n8 n9 n10 n11 n12 n13 n14 n15 n16 n17)))
+
+  ;; 各区間をアドレス上位ビットの一致で判定する。ROM と BSS は二つの部分区間の和。
+  ;; 各入力からの経路を OR 木の12段とその後の2段にそろえ、毎 tick 判定する。
+  (func selfhost-outside-banks
+    (in (address (bits 64)) (inverted (bits 10)))
+    (out outside-rom outside-bss outside-mailbox outside-stack)
+    (def high (slice address 18 46))
+    (def word-alignment (slice address 0 3))
+    (def a12 (bit address 12))
+    (def a13 (bit address 13))
+    (def a14 (bit address 14))
+    (def a15 (bit address 15))
+    (def a16 (bit address 16))
+    (def a17 (bit address 17))
+    (def n8 (bit inverted 0))
+    (def n9 (bit inverted 1))
+    (def n10 (bit inverted 2))
+    (def n11 (bit inverted 3))
+    (def n12 (bit inverted 4))
+    (def n13 (bit inverted 5))
+    (def n14 (bit inverted 6))
+    (def n15 (bit inverted 7))
+    (def n16 (bit inverted 8))
+    (def n17 (bit inverted 9))
+
+    (def rom-low-padding #b00000000000)
+    (def rom-low-test (concat word-alignment a14 a15 n16 a17 high rom-low-padding))
+    (def not-rom-low (any-bit-64 rom-low-test))
+
+    (def rom-high-padding #b0000000000)
+    (def rom-high-test (concat word-alignment a13 n14 a15 n16 a17 high rom-high-padding))
+    (def not-rom-high (any-bit-64 rom-high-test))
+
+    (def bss-low-padding #b0000000000)
+    (def bss-low-test (concat word-alignment n13 n14 a15 n16 a17 high bss-low-padding))
+    (def not-bss-low (any-bit-64 bss-low-test))
+
+    (def bss-high-padding #b000000000)
+    (def bss-high-test (concat word-alignment a12 a13 a14 n15 n16 a17 high bss-high-padding))
+    (def not-bss-high (any-bit-64 bss-high-test))
+
+    (def mailbox-padding #b00000)
+    (def mailbox-test (concat word-alignment n8 n9 n10 n11 n12 n13 a14 n15 a16 n17 high mailbox-padding))
+    (def not-mailbox (any-bit-64 mailbox-test))
+
+    (def stack-padding #b00000000000)
+    (def stack-test (concat word-alignment n14 n15 a16 n17 high stack-padding))
+    (def not-stack (any-bit-64 stack-test))
+
+    (def outside-rom (execute-and not-rom-low not-rom-high))
+    (def outside-bss (execute-and not-bss-low not-bss-high))
+    ;; 1区間のバンクも、最後の反転2段を通して判定時刻をそろえる。
+    (def outside-mailbox (execute-or not-mailbox not-mailbox))
+    (def outside-stack (execute-or not-stack not-stack)))
+
+  ;; 読み出し側では、入力を保持してバンクを判定する。
+  (func selfhost-access-banks
+    (in (address (bits 64))) (out rom bss mailbox stack)
+    (def inverted (selfhost-invert-address address))
+    (def (outside-rom outside-bss outside-mailbox outside-stack)
+      (selfhost-outside-banks address inverted))
+    (def rom (nor outside-rom outside-rom))
+    (def bss (nor outside-bss outside-bss))
+    (def mailbox (nor outside-mailbox outside-mailbox))
+    (def stack (nor outside-stack outside-stack)))
+
+  ;; 語のアドレスを確認し、ROM は読み出し、RAM は読み書きを許可する。
+  (func firmware-data-access
+    (in (address (bits 64))) (out readable writable)
+    (def (rom bss mailbox stack) (selfhost-access-banks address))
+    (def low-ram (execute-or bss mailbox))
+    (def writable (execute-or low-ram stack))
+    (def readable (execute-or rom writable)))
+
+  ;; PC の相対位置が 0x6000 未満かつ4バイト境界のときに命令を返す。
+  (func firmware-fetch
+    (in (pc-offset (bits 64))) (out (instruction (bits 32)) valid)
+    (def word-index (slice pc-offset 3 12))
+    (def half (bit pc-offset 2))
+    (def word (firmware-rom word-index))
+    (def low (slice word 0 32))
+    (def high (slice word 32 32))
+    (def zero #x00000000)
+    (def packed-low (concat low zero))
+    (def packed-high (concat high zero))
+    (def selected (::rv64::arithmetic::select half packed-low packed-high))
+    (def instruction (slice selected 0 32))
+    (def alignment (slice pc-offset 0 2))
+    (def bit-13 (bit pc-offset 13))
+    (def bit-14 (bit pc-offset 14))
+    (def outside-low (execute-and bit-13 bit-14))
+    (def outside-high (slice pc-offset 15 49))
+    (def padding #b000000000000)
+    (def tested (concat alignment outside-low outside-high padding))
+    (def invalid (any-bit-64 tested))
+    (def valid (nor invalid invalid)))
+
+  ;; tick t のフレームで許可された書き込みを t + 17 の RAM 更新に反映する。
+  ;; 読み出しはアドレスを保持して、バンク選択と値が確定してから使う。
+  (module firmware-data-memory
+    (in (address (bits 64)) (write-data (bits 64)) write)
+    (out (read-data (bits 64)) readable writable)
+    (def (rom bss mailbox stack) (selfhost-access-banks address))
+    (def low-ram (execute-or bss mailbox))
+    (def writable (execute-or low-ram stack))
+    (def readable (execute-or rom writable))
+    (def rom-address (slice address 3 12))
+    (def rom-data (firmware-rom rom-address))
+
+    ;; 正転ビットをラッチで取り込み、反転ビットと同じ tick から判定する。
+    (def incoming (concat address write-data write))
+    (def request-1 (selfhost-frame incoming 1))
+    (def framed-address (slice request-1 0 64))
+    (def inverted (selfhost-invert-address address))
+    (def (outside-rom outside-bss outside-mailbox outside-stack)
+      (selfhost-outside-banks framed-address inverted))
+
+    ;; 14段のバンク判定と許可の反転をそろえ、書き込み許可をラッチへ渡す。
+    (def request-9 (selfhost-delay-8 request-1))
+    (def request-13 (selfhost-delay-4 request-9))
+    (def request-14 (selfhost-frame request-13 1))
+    (def write-at-14 (bit request-14 128))
+    (def no-write (nor write-at-14 write-at-14))
+    (def request-bss (nor outside-bss no-write))
+    (def request-mailbox (nor outside-mailbox no-write))
+    (def request-stack (nor outside-stack no-write))
+    (def startup-1 (selfhost-ready-bit 1 1))
+    (def startup-2 (selfhost-ready-bit startup-1 1))
+    (def bss-write (selfhost-ready-bit request-bss startup-2))
+    (def mailbox-write (selfhost-ready-bit request-mailbox startup-2))
+    (def stack-write (selfhost-ready-bit request-stack startup-2))
+
+    (def request-16 (selfhost-delay-2 request-14))
+    (def request-17 (selfhost-frame request-16 1))
+    (def bss-low (slice request-17 3 10))
+    ;; BSS は0x16000が添字0になる。反転の1段をラッチの手前から通す。
+    (def bss-bit-13 (bit request-16 13))
+    (def bss-high (nor bss-bit-13 bss-bit-13))
+    (def bss-address (concat bss-low bss-high))
+    (def mailbox-address (slice request-17 3 5))
+    (def stack-address (slice request-17 3 11))
+    (def ram-write-data (slice request-17 64 64))
+    (def bss-data (selfhost-bss bss-address ram-write-data bss-write))
+    (def mailbox-data (selfhost-mailbox mailbox-address ram-write-data mailbox-write))
+    (def stack-data (selfhost-stack stack-address ram-write-data stack-write))
+
+    (def low-ram-data (::rv64::arithmetic::select mailbox bss-data mailbox-data))
+    (def ram-data (::rv64::arithmetic::select stack low-ram-data stack-data))
+    (def read-data (::rv64::arithmetic::select rom ram-data rom-data))))
