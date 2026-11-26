@@ -513,6 +513,20 @@ proof fn simple_notification_follows_issue(simple: spec_fn(int) -> bool, issue: 
     reveal(cpu_simple_path);
 }
 
+/// 命令枠に、先行命令の開始や乗算制御の遅延が残っていないことを表す。
+pub open spec fn multiplier_window_ready(
+    capture: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+    i: int,
+) -> bool {
+    &&& forall|t: int| i - 1035 <= t < i ==> !(#[trigger] issue(t))
+    &&& forall|t: int| i - 8 <= t < i + 1027 ==> !(#[trigger] finished(t))
+    &&& forall|t: int| i + 512 <= t < i + 1030 ==> !(#[trigger] capture(t))
+    &&& forall|t: int| i + 1024 <= t <= i + 1032 ==> !(#[trigger] running(t))
+}
+
 /// 乗算の命令枠が開いた後、最初の完了通知が次の枠に届くまでは issue が再発しない。
 pub proof fn multiply_window_rejects_early_issue(
     start: spec_fn(int) -> bool,
@@ -537,10 +551,7 @@ pub proof fn multiply_window_rejects_early_issue(
         4 <= i <= until < i + 34197,
         start(i + 1027),
         !simple(i + 1027),
-        forall|t: int| i - 1035 <= t < i ==> !(#[trigger] issue(t)),
-        forall|t: int| i - 8 <= t < i + 1027 ==> !(#[trigger] finished(t)),
-        forall|t: int| i + 1030 - 518 <= t < i + 1030 ==> !(#[trigger] capture(t)),
-        forall|t: int| i + 1024 <= t <= i + 1032 ==> !(#[trigger] running(t)),
+        multiplier_window_ready(capture, finished, running, issue, i),
     ensures
         forall|t: int| i < t <= until ==> !(#[trigger] issue(t)),
     decreases until - i,
@@ -598,10 +609,7 @@ pub proof fn cpu_multiply_window_completes(
         4 <= i,
         start(i + 1027),
         !simple(i + 1027),
-        forall|t: int| i - 1035 <= t < i ==> !(#[trigger] issue(t)),
-        forall|t: int| i - 8 <= t < i + 1027 ==> !(#[trigger] finished(t)),
-        forall|t: int| i + 1030 - 518 <= t < i + 1030 ==> !(#[trigger] capture(t)),
-        forall|t: int| i + 1024 <= t <= i + 1032 ==> !(#[trigger] running(t)),
+        multiplier_window_ready(capture, finished, running, issue, i),
     ensures
         forall|t: int| i < t < i + 34197 ==> !(#[trigger] issue(t)),
         forall|t: int| i - 8 <= t < i + 34188 ==> !(#[trigger] finished(t)),
@@ -609,6 +617,7 @@ pub proof fn cpu_multiply_window_completes(
         forall|t: int| i + 34182 < t < i + 35227 ==> !(#[trigger] capture(t)),
         forall|t: int| i + 34188 < t <= i + 35233 ==> !(#[trigger] finished(t)),
         forall|t: int| i + 34191 <= t <= i + 35234 ==> !(#[trigger] running(t)),
+        multiplier_window_ready(capture, finished, running, issue, i + 34197),
 {
     multiply_window_rejects_early_issue(
         start, capture, done, finished, running, mark, issue, commit, simple, i, i + 34196,
@@ -675,24 +684,135 @@ proof fn multiply_running_clears(
     assert(!start(until - 11));
 }
 
-/// 命令が有効なら、内部の乗算完了通知は commit と次の issue を起こす。
-pub proof fn valid_multiply_retirement_opens_next_window(
+/// 命令が有効なら、通常命令または乗算の完了通知は commit と次の issue を起こす。
+pub proof fn valid_retirement_opens_next_window(
     valid: spec_fn(int) -> bool,
-    finished: spec_fn(int) -> bool,
+    notice: spec_fn(int) -> bool,
     commit: spec_fn(int) -> bool,
     issue: spec_fn(int) -> bool,
     notification: int,
 )
     requires
         0 <= notification,
-        finished(notification),
+        notice(notification),
         valid(notification + 3),
-        forall|t: int| t >= 6 && #[trigger] finished(t - 6) && valid(t - 3) ==> commit(t),
+        forall|t: int| t >= 6 && #[trigger] notice(t - 6) && valid(t - 3) ==> commit(t),
         forall|t: int| t >= 4 && #[trigger] commit(t - 3) ==> issue(t),
     ensures commit(notification + 6), issue(notification + 9),
 {
-    assert(finished((notification + 6) - 6));
+    assert(notice((notification + 6) - 6));
     assert(commit((notification + 9) - 3));
+}
+
+/// 古い取り込みが存在せず、実行状態が0のままなら開始要求を受けるまで静穏状態を保つ。
+proof fn idle_multiplier_stays_quiet(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    first: int,
+    until: int,
+)
+    requires
+        multiply_pulse_timing(start, capture, done, finished, running),
+        multiply_running_timing(start, finished, running),
+        11 <= first <= until,
+        forall|t: int| first + 3 - 518 <= t < first + 3 ==> !(#[trigger] capture(t)),
+        forall|t: int| first - 3 <= t <= first + 5 ==> !(#[trigger] running(t)),
+        forall|t: int| first - 5 <= t <= until ==> !(#[trigger] start(t)),
+    ensures
+        forall|t: int| first + 3 - 518 <= t <= until + 3 ==> !(#[trigger] capture(t)),
+        forall|t: int| first - 3 <= t <= until + 11 ==> !(#[trigger] running(t)),
+        forall|t: int| first <= t <= until + 14 ==> !(#[trigger] finished(t)),
+    decreases until - first,
+{
+    if first < until {
+        idle_multiplier_stays_quiet(start, capture, done, finished, running, first, until - 1);
+        assert(!capture(until + 3 - 518));
+        assert(!running(until + 10));
+        assert(!start(until));
+        assert(!capture(until + 3));
+        assert(!running(until + 11));
+    } else {
+        assert(!capture(first + 3 - 518));
+        assert(!start(first));
+        assert(!capture(first + 3));
+        assert forall|t: int| first + 5 <= t <= first + 11 implies !(#[trigger] running(t)) by {
+            idle_running_holds(start, finished, running, first + 5, t);
+        }
+    }
+    assert forall|t: int| first <= t <= until + 14 implies !(#[trigger] finished(t)) by {
+        assert(!running(t - 3));
+    }
+}
+
+/// 解除通知の有無に関わらず、開始要求が来なければ実行状態は0のままになる。
+proof fn idle_running_holds(
+    start: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    from: int,
+    until: int,
+)
+    requires
+        multiply_running_timing(start, finished, running),
+        11 <= from <= until,
+        !running(from),
+        forall|t: int| from < t <= until ==> !(#[trigger] start(t - 11)),
+    ensures !running(until),
+    decreases until - from,
+{
+    if from < until {
+        idle_running_holds(start, finished, running, from, until - 1);
+        assert(!start(until - 11));
+    }
+}
+
+/// 通常命令では乗算器の静穏状態を次の命令枠へ引き継げる。
+pub proof fn ordinary_window_keeps_multiplier_idle(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+    simple: spec_fn(int) -> bool,
+    i: int,
+)
+    requires
+        multiply_pulse_timing(start, capture, done, finished, running),
+        multiply_running_timing(start, finished, running),
+        cpu_multiply_start_path(start, issue, commit, simple, finished),
+        cpu_simple_path(simple, issue),
+        4 <= i,
+        !start(i + 1027),
+        multiplier_window_ready(capture, finished, running, issue, i),
+    ensures
+        forall|t: int| i < t < i + 1036 ==> !(#[trigger] issue(t)),
+        forall|t: int| i + 1030 - 518 <= t < i + 2066 ==> !(#[trigger] capture(t)),
+        forall|t: int| i + 1027 <= t <= i + 2076 ==> !(#[trigger] finished(t)),
+        forall|t: int| i + 1024 <= t <= i + 2073 ==> !(#[trigger] running(t)),
+        multiplier_window_ready(capture, finished, running, issue, i + 1036),
+{
+    assert forall|t: int| i < t < i + 1036 implies !(#[trigger] issue(t)) by {
+        if issue(t) {
+            let retired = t - 9;
+            assert(commit(t - 3));
+            assert(simple((t - 3) - 6) || finished((t - 3) - 6));
+            assert(!finished(retired));
+            simple_notification_follows_issue(simple, issue, retired);
+            assert(!issue(retired - 1027));
+        }
+    }
+    let s = i + 1027;
+    assert forall|t: int| s - 5 <= t <= i + 2062 implies !(#[trigger] start(t)) by {
+        if t != s {
+            assert(!issue(t - 1027));
+        }
+    }
+    idle_multiplier_stays_quiet(start, capture, done, finished, running, s, i + 2062);
 }
 
 /// 一つの乗算の実行中に別の退役通知がなければ、次の開始までに反復は止まる。
