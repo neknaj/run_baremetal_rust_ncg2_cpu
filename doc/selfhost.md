@@ -66,3 +66,5 @@ cargo +1.99.1 run --locked --release --manifest-path verification/Cargo.toml \
 ```
 
 引数の末尾に `--event` を付けると、実ネットリストを疎実行する。最初の14,500 tick は標準 VM でも進め、各 tick の公開出力の一致を確認する。疎実行器は開発時の検証に使う。標準 VM との一般の同値性を機械検証する作業は今後の課題である。[疎実行の状態更新](event-clocked.md)
+
+この ELF を疎実行器で実行すると、15,309,127 tick で終了した。PC 遷移14,233件と結果2語（`0x1`、`0x07e00113`）が QEMU と一致した。

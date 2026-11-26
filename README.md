@@ -1,6 +1,6 @@
 # NCG2 で作る RV64IM CPU
 
-Neknaj Circuit Game 2 で RV64IM の CPU を組み、ベアメタル Rust のプログラムを動かす。最終的には、その CPU 上でも NCG2 Core で回路を評価できるようにする。
+Neknaj Circuit Game 2 で RV64IM の CPU を組み、ベアメタル Rust のプログラムを動かす。現在は、この CPU 上で Core の厳格 S 式パーサーと1ゲートの NOR 評価器を実行できる。
 
 ## Rust の起動プログラムを実行する
 
@@ -94,7 +94,7 @@ ncg2 check programs/boot.ncg2m
 
 ## Core を組み込んだ ELF
 
-固定版の Core をベアメタル Rust から呼び、RAM に置いた入力を解析・評価する。[ビルドと RAM の入出力](doc/selfhost.md)
+`selfhost.toml` では、ベアメタル Rust から Core を呼び、RAM 上のソースを解析する。続いて固定の NOR 回路を評価し、ノード数と出力を書き戻す。[ビルドと検証手順](doc/selfhost.md)
 
 ## 起動回路の部品を検証する
 

@@ -25,7 +25,7 @@ Core を組み込んだ RV64IM ELF 用の `selfhost-data-map` は以下の4区�
 | `0x2bf00` | `0x2c000` | 入力要求 |
 | `0x2c000` | `0x30000` | スタックと結果 |
 
-セルフホスト用 ELF からは `python tools/elf_image.py <ELF> <出力.ncg2> --format ncg2-rom --rom-layout core` で ROM を作る。このコマンドは ELF のロード領域を上の配置と照合する。Core の厳格 S 式解析と NOR 評価を含む ELF を使い、実ネットリストの全4,096語を検証した。セルフホスト用の ROM および RAM と CPU をつなぐ作業は進行中である。
+セルフホスト用 ELF からは `python tools/elf_image.py <ELF> <出力.ncg2> --format ncg2-rom --rom-layout core` で ROM を作る。このコマンドは ELF のロード領域を上の配置と照合する。Core の厳格 S 式解析と NOR 評価を含む ELF を使い、実ネットリストの全4,096語を検証した。この ROM と RAM を使って NCG2 の CPU 上で ELF を実行した。[実行結果と QEMU との照合](selfhost.md#qemu-の-pc-遷移との照合)
 
 ## RAM の更新と読み出し
 
