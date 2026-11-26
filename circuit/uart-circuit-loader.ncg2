@@ -1,0 +1,87 @@
+(namespace rv64::arithmetic
+  (export uart-loader-index)
+
+  ;; RAM の先頭語はワード番号 0x2000 にある。
+  (func uart-loader-index
+    (in (written (bits 16)) (total (bits 16)))
+    (out (next (bits 16)) (address (bits 64)) last)
+    (def (increment-carry next) (add-16 written #x0001 0))
+    (def (base-carry offset) (add-16 written #x2000 0))
+    (def low-zero #b000)
+    (def high-zero #b000000000000000000000000000000000000000000000)
+    (def address (concat low-zero offset high-zero))
+    (def (last unused-less) (compare-16 next total))))
+
+(namespace rv64
+  (export uart-circuit-loader uart-circuit-loader-system)
+  (latch loader-word (width 64))
+  (latch loader-count (width 16))
+
+  ;; ready は消費するまで保持される。実行中に届いた次の語は受信器側に残す。
+  ;; 語を受理できる状態に入った変化だけを1 tick の要求にする。
+  (module uart-loader-take (in offer) (out take)
+    (def inverse (nor offer offer))
+    (def previous (delay-2 offer))
+    (def rising (nor inverse previous))
+    (def settled (delay-16 1))
+    (def take (accept-pulse rising settled)))
+
+  ;; word、ready、receiver-error は UART の受信語バッファから受け取る。
+  ;; 受信器の待機語と、ここで保持する実行中の語で最大2語を扱う。
+  ;; 書き込み先を安定させてから許可を出し、要求が RAM へ届くまで次の添字に進めない。
+  (module uart-circuit-loader
+    (in (word (bits 64)) ready receiver-error)
+    (out ack (address (bits 64)) (data (bits 64)) write finished error)
+    (def loading (nor busy finished))
+    (def receiving (execute-and ready loading))
+    (def allowed (nor error error))
+    (def offer (execute-and receiving allowed))
+    (def take (uart-loader-take offer))
+    (def data (loader-word word take))
+    (def payload (phase-bit got-header take))
+    (def header (nor payload payload))
+
+    (def release (delay-128 take))
+    (def busy (phase-mode take release))
+    (def header-window (delay-64 take))
+    (def count-valid (in-address-range data #x0000000000000001 #x0000000000008401))
+    (def good-header (execute-and header count-valid))
+    (def valid-header (execute-and good-header allowed))
+    (def header-ack (accept-pulse header-window valid-header))
+    (def count-invalid (nor count-valid count-valid))
+    (def bad-header (execute-and header count-invalid))
+    (def reject-header (accept-pulse header-window bad-header))
+    (def unfinished (nor finished finished))
+    (def pending-error (execute-and receiver-error unfinished))
+    (def receive-error (execute-or pending-error reject-header))
+    (def error-settled (delay-16 1))
+    (def latch-error (accept-pulse receive-error error-settled))
+    (def error (phase-bit 1 latch-error))
+    (def got-header (phase-bit 1 header-ack))
+    (def count-low (slice data 0 16))
+    (def total (loader-count count-low header-ack))
+    (def payload-ack (accept-pulse take got-header))
+    (def accepted (execute-or header-ack payload-ack))
+    (def ack (phase-bit accepted error-settled))
+
+    (def setup (delay-32 take))
+    (def write-window (delay-8 setup))
+    (def payload-enabled (execute-and payload allowed))
+    (def write (accept-pulse write-window payload-enabled))
+    (def committed (delay-16 write))
+    (def written (loader-count next-index committed))
+    (def (next-index address last-word) (::rv64::arithmetic::uart-loader-index written total))
+    (def can-finish (execute-and last-word allowed))
+    (def done (accept-pulse committed can-finish))
+    (def finished (phase-bit 1 done)))
+
+  ;; 8 tick/bit の連続 UART、ローダー、RAM、CPU を同じ tick で動かす。
+  (module uart-circuit-loader-system
+    (in rx (probe-address (bits 64)))
+    (out (pc (bits 64)) (bus-address (bits 64)) (read-data (bits 64))
+         owner issue commit stopped bus-write uart-error)
+    (def (word ready receiver-error) (uart-loader-receive-8 rx ack))
+    (def (ack address data write finished uart-error)
+      (uart-circuit-loader word ready receiver-error))
+    (def (pc bus-address read-data owner issue commit stopped bus-write)
+      (uart-loader-handoff probe-address address data write finished))))
