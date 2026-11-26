@@ -1,8 +1,9 @@
 //! Core を含む ELF の転送、実行、QEMU との照合を行う。
 
-use std::{error::Error, fs, path::Path, time::Instant};
+use std::{collections::BTreeMap, error::Error, fs, path::Path, time::Instant};
 
-use circuitgame2_core::netlist::ClockedVm;
+use circuitgame2_core::netlist::{ClockedVm, Wire};
+use ncg2_event_queue::{fanout::Pin, nor_groups::classify_nor_group};
 use ncg2_rv64_arithmetic_proof::event_clocked::EventVm;
 
 #[path = "../support/uart.rs"]
@@ -179,16 +180,27 @@ struct PhaseMetrics {
     ticks: u64,
     evaluations: u64,
     chain_evaluations: u64,
+    grouped_nor_evaluations: u64,
+    outer_group_ticks: u64,
+    dense_group_ticks: u64,
     ticks_without_other_evaluations: u64,
     commit_ticks: u64,
     write_ticks: u64,
 }
 
 impl PhaseMetrics {
-    fn record(&mut self, evaluations: u64, chain_evaluations: u64, commit: bool, write: bool) {
+    fn record(
+        &mut self,
+        evaluations: u64,
+        chain_evaluations: u64,
+        grouped_nor_evaluations: u64,
+        commit: bool,
+        write: bool,
+    ) {
         self.ticks += 1;
         self.evaluations += evaluations;
         self.chain_evaluations += chain_evaluations;
+        self.grouped_nor_evaluations += grouped_nor_evaluations;
         self.ticks_without_other_evaluations += u64::from(evaluations == chain_evaluations);
         self.commit_ticks += u64::from(commit);
         self.write_ticks += u64::from(write);
@@ -204,12 +216,16 @@ impl PhaseMetrics {
             self.commit_ticks,
             self.write_ticks,
         );
+        println!(
+            "  NOR 候補 {} 評価、候補群の稼働 {} 回、同じ群で4ゲート以上を評価 {} 回",
+            self.grouped_nor_evaluations, self.outer_group_ticks, self.dense_group_ticks,
+        );
     }
 }
 
-#[derive(Default)]
 struct TransferMetrics {
     chain_nodes: Vec<bool>,
+    grouped_nor: WordGroupActivity,
     waveform: PhaseMetrics,
     ack: PhaseMetrics,
 }
@@ -244,18 +260,22 @@ fn flash(
             let ready = match metrics.as_deref_mut() {
                 Some(metrics) => {
                     let mut chain_evaluations = 0;
+                    let mut grouped_nor_evaluations = 0;
                     let ready = machine.step_with_evaluation(rx, |node| {
                         chain_evaluations += u64::from(metrics.chain_nodes[node]);
+                        grouped_nor_evaluations += u64::from(metrics.grouped_nor.observe(node));
                     })?;
                     let phase = if machine.tick - start <= WORD_TICKS {
                         &mut metrics.waveform
                     } else {
                         &mut metrics.ack
                     };
+                    metrics.grouped_nor.finish_tick(phase);
                     let output = machine.event.output();
                     phase.record(
                         machine.event.evaluated_last_tick() as u64,
                         chain_evaluations,
+                        grouped_nor_evaluations,
                         output[194],
                         output[196],
                     );
@@ -302,7 +322,143 @@ fn flash(
     Ok(())
 }
 
-fn measure_transfer(project: &Path, image: &Path, count: usize) -> Result<(), Box<dyn Error>> {
+struct WordGroupActivity {
+    gate_group: Vec<Option<usize>>,
+    active_counts: Vec<u8>,
+    active_groups: Vec<usize>,
+}
+
+impl WordGroupActivity {
+    fn observe(&mut self, node: usize) -> bool {
+        let Some(group) = self.gate_group.get(node).copied().flatten() else {
+            return false;
+        };
+        if self.active_counts[group] == 0 {
+            self.active_groups.push(group);
+        }
+        self.active_counts[group] += 1;
+        true
+    }
+
+    fn finish_tick(&mut self, phase: &mut PhaseMetrics) {
+        for group in self.active_groups.drain(..) {
+            phase.outer_group_ticks += 1;
+            phase.dense_group_ticks += u64::from(self.active_counts[group] >= 4);
+            self.active_counts[group] = 0;
+        }
+    }
+}
+
+fn candidate_word_gates(vm: &ClockedVm) -> WordGroupActivity {
+    let netlist = vm.netlist();
+    let slot_count = netlist.input_count + netlist.gates.len();
+    let pin = |wire| match wire {
+        Wire::Input(slot) => slot,
+        Wire::Gate(index) => netlist.input_count + index,
+        Wire::Constant(value) => slot_count + usize::from(value),
+    };
+    let decode = |index| {
+        if index < slot_count { Pin::Slot(index) } else { Pin::Constant(index != slot_count) }
+    };
+    let mut by_inputs: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for (index, gate) in netlist.gates.iter().enumerate() {
+        let pair = (pin(gate.left), pin(gate.right));
+        by_inputs.entry(pair).or_default().push(index);
+        // NOR の左右を入れ替えても値は同じになる。
+        if pair.0 != pair.1 {
+            by_inputs.entry((pair.1, pair.0)).or_default().push(index);
+        }
+    }
+    let mut gate_group = vec![None; netlist.gates.len()];
+    let mut count = 0;
+    for (left_step, right_step) in [(1, 1), (1, 0), (0, 1)] {
+        for &first in by_inputs.keys() {
+            let mut members = [0; 64];
+            let mut pins = [(Pin::Constant(false), Pin::Constant(false)); 64];
+            let mut width = 0;
+            while width < 64 {
+                let pair = (first.0 + width * left_step, first.1 + width * right_step);
+                let Some(gate) = by_inputs.get(&pair).and_then(|gates| {
+                    gates.iter().copied().find(|&index| gate_group[index].is_none())
+                }) else {
+                    break;
+                };
+                if members[..width].contains(&gate) {
+                    break;
+                }
+                members[width] = gate;
+                pins[width] = (decode(pair.0), decode(pair.1));
+                width += 1;
+            }
+            if width >= 4 && classify_nor_group(&pins[..width]).is_some() {
+                for &gate in &members[..width] {
+                    gate_group[gate] = Some(count);
+                }
+                count += 1;
+            }
+        }
+    }
+    WordGroupActivity {
+        gate_group,
+        active_counts: vec![0; count],
+        active_groups: Vec::with_capacity(count),
+    }
+}
+
+fn candidate_shared_input_groups(vm: &ClockedVm) -> WordGroupActivity {
+    let netlist = vm.netlist();
+    let source_slot = |wire| match wire {
+        Wire::Input(slot) => Some(slot),
+        Wire::Gate(index) => Some(netlist.input_count + index),
+        Wire::Constant(_) => None,
+    };
+    let mut readers = vec![Vec::new(); netlist.input_count + netlist.gates.len()];
+    for (gate, inputs) in netlist.gates.iter().enumerate() {
+        let left = source_slot(inputs.left);
+        let right = source_slot(inputs.right);
+        if let Some(slot) = left {
+            readers[slot].push(gate);
+        }
+        if let Some(slot) = right
+            && right != left
+        {
+            readers[slot].push(gate);
+        }
+    }
+    let mut sources: Vec<_> = readers
+        .iter()
+        .enumerate()
+        .filter(|(_, gates)| gates.len() >= 4)
+        .collect();
+    sources.sort_unstable_by_key(|&(slot, gates)| (std::cmp::Reverse(gates.len()), slot));
+    let mut gate_group = vec![None; netlist.gates.len()];
+    let mut count = 0;
+    for (_, readers) in sources {
+        let available: Vec<_> = readers
+            .iter()
+            .copied()
+            .filter(|&gate| gate_group[gate].is_none())
+            .collect();
+        for group in available.chunks(64).filter(|group| group.len() >= 4) {
+            for &gate in group {
+                gate_group[gate] = Some(count);
+            }
+            count += 1;
+        }
+    }
+    WordGroupActivity {
+        gate_group,
+        active_counts: vec![0; count],
+        active_groups: Vec::with_capacity(count),
+    }
+}
+
+fn measure_transfer(
+    project: &Path,
+    image: &Path,
+    count: usize,
+    shared_input: bool,
+) -> Result<(), Box<dyn Error>> {
     let image = fs::read(image)?;
     let words = image_words(&image)?;
     if count == 0 || count >= words.len() {
@@ -319,9 +475,16 @@ fn measure_transfer(project: &Path, image: &Path, count: usize) -> Result<(), Bo
     for stage in chains.iter().flatten().copied() {
         chain_nodes[gate_count + stage] = true;
     }
+    let grouped_nor = if shared_input {
+        candidate_shared_input_groups(&machine.reference)
+    } else {
+        candidate_word_gates(&machine.reference)
+    };
     let mut metrics = TransferMetrics {
         chain_nodes,
-        ..TransferMetrics::default()
+        grouped_nor,
+        waveform: PhaseMetrics::default(),
+        ack: PhaseMetrics::default(),
     };
     let started = Instant::now();
     // ヘッダーには元の全語数を残し、最初の count 語の ACK と RAM を同じ経路で調べる。
@@ -337,6 +500,13 @@ fn measure_transfer(project: &Path, image: &Path, count: usize) -> Result<(), Bo
     println!(
         "縮約候補の遅延鎖 {} 本、ラッチ {stages} 個、最長 {longest} 段",
         chains.len(),
+    );
+    let groups = &metrics.grouped_nor;
+    let grouped = groups.gate_group.iter().filter(|candidate| candidate.is_some()).count();
+    let grouping = if shared_input { "共通入力" } else { "連続した入力" };
+    println!(
+        "{grouping}で集めた4〜64ゲートの候補は {} 群、NOR {grouped}/{} 個",
+        groups.active_counts.len(), groups.gate_group.len(),
     );
     Ok(())
 }
@@ -397,13 +567,18 @@ fn verify_execution(
 fn main() -> Result<(), Box<dyn Error>> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if let [project, image, flag, count] = args.as_slice()
-        && flag == "--measure-transfer"
+        && (flag == "--measure-transfer" || flag == "--measure-transfer-shared")
     {
         let count = count
             .to_str()
             .ok_or("計測する語数は十進整数で指定する。")?
             .parse()?;
-        return measure_transfer(Path::new(project), Path::new(image), count);
+        return measure_transfer(
+            Path::new(project),
+            Path::new(image),
+            count,
+            flag == "--measure-transfer-shared",
+        );
     }
     let (project, image, log, expected, limit) = match args.as_slice() {
         [project, image, log, info, limit] => {

@@ -5,6 +5,7 @@ extern crate alloc;
 
 pub mod delay;
 pub mod fanout;
+pub mod nor_groups;
 pub mod nor_inputs;
 
 use alloc::vec::Vec;
