@@ -2,6 +2,8 @@
 
 Neknaj Circuit Game 2 で RV64IM の CPU を組み、ベアメタル Rust のプログラムを動かす。現在は、この CPU 上で Core の厳格 S 式パーサーと1ゲートの NOR 評価器を実行できる。
 
+[設計と検証のドキュメント](https://neknaj.github.io/run_baremetal_rust_ncg2_cpu/)では CPU の構成、UART ブート、Core の実行を説明する。ローカルで読むにはリポジトリ直下で `mdbook serve` を実行する。
+
 ## Rust の起動プログラムを実行する
 
 `firmware.toml` は、リポジトリに同梱した Rust ELF のイメージを読む NCG2 回路を起動する。実行に Python や QEMU は不要で、`ncg2` の `run` で tick を進める。

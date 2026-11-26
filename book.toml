@@ -1,0 +1,12 @@
+[book]
+title = "NCG2 で作る RV64IM CPU"
+language = "ja"
+src = "doc"
+
+[build]
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/neknaj/run_baremetal_rust_ncg2_cpu"
+edit-url-template = "https://github.com/neknaj/run_baremetal_rust_ncg2_cpu/edit/main/{path}"
+site-url = "/run_baremetal_rust_ncg2_cpu/"

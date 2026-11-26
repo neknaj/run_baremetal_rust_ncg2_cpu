@@ -24,6 +24,6 @@ cargo +1.99.1 test --release --locked --manifest-path verification/Cargo.toml \
   --target "$host" --target-dir target/verification --test firmware_machine
 ```
 
-`firmware-dispatch` と `firmware-dispatch-core` の検証では、起動デモ用とセルフホスト用のメモリ配置をそれぞれ選ぶ。任意の命令語、PC、レジスタ値、フェッチの成否、メモリの読み出し値と乗算の結果について、受理条件、次の PC、レジスタと RAM への更新要求、書き込む値を参照仕様と照合する。無効な入力では PC オフセットを保持し、両方の更新要求を抑止することも検証する。実際に更新する tick は CPU の結合テストで確認する。[組み合わせ回路と乗算の検証手順](../README.md#起動回路の部品を検証する)
+`firmware-dispatch` と `firmware-dispatch-core` の検証では、起動デモ用とセルフホスト用のメモリ配置をそれぞれ選ぶ。任意の命令語、PC、レジスタ値、フェッチの成否、メモリの読み出し値と乗算の結果について、受理条件、次の PC、レジスタと RAM への更新要求、書き込む値を参照仕様と照合する。無効な入力では PC オフセットを保持し、両方の更新要求を抑止することも検証する。実際に更新する tick は CPU の結合テストで確認する。[組み合わせ回路と乗算の検証手順](https://github.com/neknaj/run_baremetal_rust_ncg2_cpu#起動回路の部品を検証する)
 
-命令完了から状態更新までを含む CPU 全体の形式証明、RV64IM の残りの命令、NCG2 Core のセルフホストは今後の作業である。
+小型の Core ELF は CPU 上で実行済みである。より大きな Core ELF の UART 転送から終了までの照合、CPU 全体の形式証明、未対応の RV64IM 命令の実装が残る。[Core の実行と検証](selfhost.md)
