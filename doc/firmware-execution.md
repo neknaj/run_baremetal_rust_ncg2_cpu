@@ -24,6 +24,6 @@ cargo +1.99.1 test --release --locked --manifest-path verification/Cargo.toml \
   --target "$host" --target-dir target/verification --test firmware_machine
 ```
 
-`firmware-dispatch` の検証では任意の命令語、PC、レジスタ値、フェッチの成否、メモリの読み出し値と乗算の結果を与える。受理条件、次の PC、レジスタと RAM への更新要求、書き込む値を参照仕様と照合する。無効な入力では PC オフセットを保持し、両方の更新要求を抑止することも検証する。実際に更新する tick の検証は CPU の結合テストで行う。[組み合わせ回路と乗算の検証手順](../README.md#起動回路の部品を検証する)
+`firmware-dispatch` と `firmware-dispatch-core` の検証では、起動デモ用とセルフホスト用のメモリ配置をそれぞれ選ぶ。任意の命令語、PC、レジスタ値、フェッチの成否、メモリの読み出し値と乗算の結果について、受理条件、次の PC、レジスタと RAM への更新要求、書き込む値を参照仕様と照合する。無効な入力では PC オフセットを保持し、両方の更新要求を抑止することも検証する。実際に更新する tick は CPU の結合テストで確認する。[組み合わせ回路と乗算の検証手順](../README.md#起動回路の部品を検証する)
 
 命令完了から状態更新までを含む CPU 全体の形式証明、RV64IM の残りの命令、NCG2 Core のセルフホストは今後の作業である。

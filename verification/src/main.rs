@@ -42,15 +42,29 @@ fn maximum_depth(netlist: &NorNetlist) -> usize {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let Some(
-        selected @ ("add" | "shift-left" | "boot-ram-address" | "execute-boot" | "firmware-rom"
-        | "firmware-fetch" | "firmware-data-map" | "execute-control" | "xor"
-        | "compare-unsigned" | "less-than-unsigned" | "execute-load" | "execute-logic"
-        | "mul-round" | "firmware-dispatch" | "selfhost-data-map"),
+        selected @ ("add"
+        | "shift-left"
+        | "boot-ram-address"
+        | "execute-boot"
+        | "firmware-rom"
+        | "firmware-fetch"
+        | "firmware-data-map"
+        | "execute-control"
+        | "xor"
+        | "compare-unsigned"
+        | "less-than-unsigned"
+        | "execute-load"
+        | "execute-logic"
+        | "mul-round"
+        | "firmware-dispatch"
+        | "firmware-dispatch-core"
+        | "selfhost-data-map"),
     ) = args.get(1).map(String::as_str)
     else {
         return Err("検証対象の NCG2 関数名を指定する。対象は README と各設計文書を参照。".into());
     };
     let arithmetic = ["decode.ncg2", "arithmetic.ncg2"];
+    let core_profile = selected == "firmware-dispatch-core";
     let boot = [
         "decode.ncg2",
         "boot-rom.ncg2",
@@ -77,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "execute-logic.ncg2",
         ],
         "mul-round" => &["decode.ncg2", "arithmetic.ncg2", "multiply.ncg2"],
-        "firmware-dispatch" => &[
+        "firmware-dispatch" | "firmware-dispatch-core" => &[
             "decode.ncg2",
             "arithmetic.ncg2",
             "boot-rom.ncg2",
@@ -85,7 +99,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "execute-boot.ncg2",
             "execute-control.ncg2",
             "firmware-rom.ncg2",
-            "firmware-memory.ncg2",
+            if core_profile {
+                "selfhost-memory.ncg2"
+            } else {
+                "firmware-memory.ncg2"
+            },
             "execute-load.ncg2",
             "execute-logic.ncg2",
             "subword-memory.ncg2",
@@ -123,7 +141,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let sources = paths
         .iter()
-        .map(|path| std::fs::read_to_string(format!("circuit/{path}")))
+        .map(|path| {
+            if core_profile && *path == "firmware-rom.ncg2" {
+                // 命令判定は ROM の値を入力として受け取る。ここでは配線に必要な幅だけをそろえる。
+                Ok(include_str!("../fixtures/selfhost-rom.ncg2").to_owned())
+            } else {
+                std::fs::read_to_string(format!("circuit/{path}"))
+            }
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let snapshots: Vec<_> = paths
         .iter()
@@ -139,10 +164,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let aliases = check_use_aliases(&targets).map_err(|error| format!("{error:?}"))?;
     let file = paths.len() - 1;
     let circuit = &project.circuits()[file];
+    let function = if core_profile {
+        "firmware-dispatch"
+    } else {
+        selected
+    };
     let declaration = circuit
         .names
         .iter()
-        .find(|n| n.name.word == selected)
+        .find(|n| n.name.word == function)
         .ok_or("検証対象の回路の宣言が見つからない。")?;
     let entry = circuit
         .syntax
@@ -170,7 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-load" => (96, 71),
         "execute-logic" => (160, 67),
         "mul-round" => (386, 257),
-        "firmware-dispatch" => (417, 266),
+        "firmware-dispatch" | "firmware-dispatch-core" => (417, 266),
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
         "firmware-data-map" => (64, 28),
@@ -185,7 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-load" => Some(468),
         "execute-logic" => Some(31),
         "mul-round" => Some(457),
-        "firmware-dispatch" => Some(505),
+        "firmware-dispatch" | "firmware-dispatch-core" => Some(505),
         _ => None,
     };
     if let Some(limit) = depth_limit {
@@ -236,8 +266,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firmware::emit_selfhost_data_map(outputs);
     } else if selected == "mul-round" {
         multiply::emit(outputs);
-    } else if selected == "firmware-dispatch" {
-        firmware::emit_dispatch(outputs);
+    } else if matches!(selected, "firmware-dispatch" | "firmware-dispatch-core") {
+        firmware::emit_dispatch(outputs, core_profile);
     } else if matches!(selected, "execute-load" | "execute-logic") {
         let instruction = vector((0..32).map(|i| format!("i{i}")));
         let rs1 = vector((32..96).map(|i| format!("i{i}")));

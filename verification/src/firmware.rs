@@ -5,7 +5,8 @@ use circuitgame2_core::netlist::{NorNetlist, Wire};
 use super::{name, vector};
 
 /// 命令、フェッチの成否、オペランド、メモリと乗算の結果を独立した入力として比較する。
-pub(super) fn emit_dispatch(outputs: &[Wire]) {
+pub(super) fn emit_dispatch(outputs: &[Wire], core_profile: bool) {
+    println!("(define-fun core-profile () Bool {core_profile})");
     for (port, start, stop) in [
         ("instruction", 0, 32),
         ("pc", 32, 96),

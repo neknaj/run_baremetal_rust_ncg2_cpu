@@ -69,8 +69,11 @@
 (define-fun in-range ((at (_ BitVec 64)) (first (_ BitVec 64)) (end (_ BitVec 64))) Bool
   (and (bvuge at first) (bvult at end)))
 (define-fun ram ((at (_ BitVec 64))) Bool
-  (or (in-range at #x0000000000011000 #x0000000000012000)
-      (in-range at #x000000000002c000 #x0000000000030000)))
+  (ite core-profile
+    (or (in-range at #x0000000000016000 #x0000000000019000)
+        (in-range at #x000000000002bf00 #x0000000000030000))
+    (or (in-range at #x0000000000011000 #x0000000000012000)
+        (in-range at #x000000000002c000 #x0000000000030000))))
 (define-fun aligned-word ((at (_ BitVec 64))) Bool
   (= (bvurem at (_ bv8 64)) (_ bv0 64)))
 (define-fun sum-i () (_ BitVec 64) (bvadd rs1 immediate-i))
@@ -84,7 +87,8 @@
     (and sw (= (bvurem store-address (_ bv4 64)) (_ bv0 64)))))
 (define-fun readable ((address (_ BitVec 64))) Bool
   (or (ram address)
-      (in-range address #x0000000000010000 #x0000000000010100)))
+      (in-range address #x0000000000010000
+        (ite core-profile #x0000000000016000 #x0000000000010100))))
 (define-fun load-ok () Bool
   (or (and ld (aligned-word sum-i) (readable sum-i))
       (and load-byte (readable (word-address sum-i)))))
