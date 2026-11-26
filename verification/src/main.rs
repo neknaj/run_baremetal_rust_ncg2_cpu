@@ -57,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | "execute-logic"
         | "execute-divide"
         | "mul-round"
+        | "mul-correct"
         | "div-round"
         | "div-wide-next"
         | "divide-prepare"
@@ -135,6 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "execute-divide.ncg2",
         ],
         "mul-round" => &["decode.ncg2", "arithmetic.ncg2", "multiply.ncg2"],
+        "mul-correct" => &["decode.ncg2", "arithmetic.ncg2", "multiply-correct.ncg2"],
         "div-round" | "div-wide-next" => &["decode.ncg2", "arithmetic.ncg2", "divide.ncg2"],
         "divide-prepare" | "divide-result" => {
             &["decode.ncg2", "arithmetic.ncg2", "divide-operands.ncg2"]
@@ -239,6 +241,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-logic" => (160, 67),
         "execute-divide" => (32, 4),
         "mul-round" => (386, 257),
+        "mul-correct" => (260, 64),
         "div-round" => (129, 65),
         "div-wide-next" => (387, 258),
         "divide-prepare" => (130, 128),
@@ -260,6 +263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-logic" => Some(31),
         "execute-divide" => Some(14),
         "mul-round" => Some(457),
+        "mul-correct" => Some(477),
         "div-round" => Some(462),
         "div-wide-next" => Some(480),
         "divide-prepare" => Some(457),
@@ -385,6 +389,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("(define-fun next-running () Bool {})", name(outputs[256]));
         println!("(define-fun next-done () Bool {})", name(outputs[257]));
         print!("{}", include_str!("div_wide_next.smt2"));
+    } else if selected == "mul-correct" {
+        for (port, start) in [("left", 0), ("right", 64), ("low", 128), ("high", 192)] {
+            let bits = vector((start..start + 64).map(|index| format!("i{index}")));
+            println!("(define-fun {port} () (_ BitVec 64) {bits})");
+        }
+        for (offset, port) in ["high-half", "signed-left", "signed-right", "word-mode"]
+            .into_iter()
+            .enumerate()
+        {
+            println!("(define-fun {port} () Bool i{})", 256 + offset);
+        }
+        let result = vector(outputs.iter().copied().map(name));
+        println!("(define-fun result () (_ BitVec 64) {result})");
+        print!("{}", include_str!("multiply_correct.smt2"));
     } else if selected == "mul-round" {
         multiply::emit(outputs);
     } else if matches!(

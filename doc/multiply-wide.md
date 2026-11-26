@@ -36,3 +36,24 @@ cargo +1.99.1 test --locked --manifest-path verification/Cargo.toml \
 ```
 
 Z3 は合計3行の `unsat` を返す。CPU の命令選択と書き戻しは接続側で検証する。
+
+## 符号付き上位語と MULW
+
+`::rv64::arithmetic::mul-correct` は元のオペランド、符号なし積の下位語と上位語、命令の指定を受け取る。MULH は両方のオペランドを符号付きとして読み、MULHSU は左のオペランドだけを符号付きとして読む。MULW は積の下位32ビットをビット31から64ビットに符号拡張する。[RISC-V M 拡張の乗算仕様](https://docs.riscv.org/reference/isa/v20240411/unpriv/m-st-ext.html)
+
+64ビットの語の値域の大きさを `B = 2^64` とする。符号付きで負のオペランドの値は同じビット列を符号なしとして読んだ値から `B` を引いて得られる。左を負として読む場合は符号なし積の上位語から右の値を引き、右を負として読む場合は左の値を引く。両方が負のときに生じる `B²` の項は、積を128ビットで表すと上位64ビットの値に影響しない。
+
+`word-mode` が1なら MULW の値を返す。それ以外では `high-half` で下位語か補正後の上位語を選ぶ。`signed-left` と `signed-right` は上位語を補正するときに使う。入力が変わった後の最長経路は477段で、展開後の NOR は4,238個である。
+
+Z3 は260ビットの全入力について、展開した NOR の出力を独立したビットベクトル仕様と照合する。Verus は2語が元の符号なし積を表す場合に、補正した上位語が指定された符号での積の上位64ビットになることと、MULW が下位32ビット同士の積と一致することを証明する。
+
+```sh
+set -e
+host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+mkdir -p target/verification
+model=target/verification/mul-correct.smt2
+cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
+  --target "$host" --target-dir target/verification -- mul-correct > "$model"
+test "$(z3 -smt2 "$model")" = unsat
+verus verification/multiply_correction.rs --crate-type=lib --no-cheating
+```

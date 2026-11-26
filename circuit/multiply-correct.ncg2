@@ -1,0 +1,33 @@
+(namespace rv64::arithmetic
+  (export mul-correct)
+
+  ;; 符号付きで負のオペランドの値は同じビット列を符号なしで読んだ値より2^64小さい。
+  ;; 相手の値を上位語から引けば、積の下位語を保ったままこの差を補正できる。
+  (func mul-correct
+    (in (left (bits 64)) (right (bits 64)) (low (bits 64)) (high (bits 64))
+        high-half signed-left signed-right word-mode)
+    (out (result (bits 64)))
+    (def left-sign (bit left 63))
+    (def right-sign (bit right 63))
+    (def left-negative (select-bit signed-left 0 left-sign))
+    (def right-negative (select-bit signed-right 0 right-sign))
+    (def zero #x0000000000000000)
+    (def ones #xffffffffffffffff)
+    (def left-correction (select right-negative zero left))
+    (def right-correction (select left-negative zero right))
+    (def inverted-left (xor left-correction ones))
+    (def inverted-right (xor right-correction ones))
+    (def (_first-carry first) (add-64 high inverted-left 1))
+    (def (_second-carry corrected-high) (add-64 first inverted-right 1))
+    (def full-result (select high-half low corrected-high))
+
+    ;; MULW では積の下位32ビットを返し、ビット31を上半分に複製する。
+    (def word (slice low 0 32))
+    (def word-sign (bit word 31))
+    (def fill-2 (concat word-sign word-sign))
+    (def fill-4 (concat fill-2 fill-2))
+    (def fill-8 (concat fill-4 fill-4))
+    (def fill-16 (concat fill-8 fill-8))
+    (def fill-32 (concat fill-16 fill-16))
+    (def word-result (concat word fill-32))
+    (def result (select word-mode full-result word-result))))

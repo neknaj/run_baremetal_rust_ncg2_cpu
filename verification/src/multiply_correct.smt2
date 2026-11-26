@@ -1,0 +1,11 @@
+; 負の入力に対応する補正量を選び、上位語に対して2回の減算を行う。
+(define-fun left-term () (_ BitVec 64)
+  (ite (and signed-right (bvslt right (_ bv0 64))) left (_ bv0 64)))
+(define-fun right-term () (_ BitVec 64)
+  (ite (and signed-left (bvslt left (_ bv0 64))) right (_ bv0 64)))
+(define-fun corrected-high () (_ BitVec 64)
+  (bvsub (bvsub high left-term) right-term))
+(define-fun expected () (_ BitVec 64)
+  (ite word-mode ((_ sign_extend 32) ((_ extract 31 0) low))
+    (ite high-half corrected-high low)))
+(assert (distinct result expected))
