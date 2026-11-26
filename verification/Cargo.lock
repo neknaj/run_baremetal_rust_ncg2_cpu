@@ -96,6 +96,14 @@ dependencies = [
  "circuitgame2-core",
  "circuitgame2-project-config",
  "ncg2-event-queue",
+ "ncg2-uart-loader",
+]
+
+[[package]]
+name = "ncg2-uart-loader"
+version = "0.1.0"
+dependencies = [
+ "vstd",
 ]
 
 [[package]]

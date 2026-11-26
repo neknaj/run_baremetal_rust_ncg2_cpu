@@ -1,0 +1,11 @@
+[package]
+name = "ncg2-uart-loader"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+vstd = { version = "=0.0.0-2026-11-01-0251", default-features = false, features = ["alloc"] }
+
+[package.metadata.verus]
+verify = true

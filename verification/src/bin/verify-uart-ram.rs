@@ -46,7 +46,11 @@ fn lower(module: &str) -> Result<ClockedVm, Box<dyn Error>> {
         text,
         revision: 0,
     });
-    let project = parse_circuit_project(&snapshots).map_err(|error| format!("{error:?}"))?;
+    lower_snapshots(&snapshots, module)
+}
+
+fn lower_snapshots(snapshots: &[SourceSnapshot<'_>], module: &str) -> Result<ClockedVm, Box<dyn Error>> {
+    let project = parse_circuit_project(snapshots).map_err(|error| format!("{error:?}"))?;
     let targets = index_use_targets(&project).map_err(|error| format!("{error:?}"))?;
     let aliases = check_use_aliases(&targets).map_err(|error| format!("{error:?}"))?;
     let file = snapshots.len() - 1;
@@ -141,7 +145,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAP_DEPTH, lower};
+    use super::{MAP_DEPTH, lower, lower_snapshots};
+    use circuitgame2_core::project::SourceSnapshot;
     use circuitgame2_core::netlist::ClockedVm;
 
     fn tick(vm: &mut ClockedVm, address: u64, value: u64, write: bool) -> u64 {
@@ -179,6 +184,107 @@ mod tests {
             .iter()
             .enumerate()
             .fold(0, |word, (bit, &value)| word | (u64::from(value) << bit))
+    }
+
+    #[test]
+    fn pipelined_loader_writes_to_the_same_ncg2_ram_port() {
+        use ncg2_uart_loader::{BootLoader, Receive, ENTRY_ADDRESS};
+        let mut vm = lower("uart-ram").unwrap();
+        let mut loader = BootLoader::reset();
+        let words = [0xa6f0_1cde_3227_1917, 0x8777, 0xff04_a1ab_a5d8_77dc];
+        let mut sent = 0;
+        let mut confirmed = 0;
+        let mut credit = 0;
+        for cycle in 0..200 {
+            let input = if cycle == 0 {
+                Receive::Word(words.len() as u64)
+            } else if credit != 0 && sent < words.len() {
+                let word = words[sent];
+                sent += 1;
+                Receive::Word(word)
+            } else {
+                Receive::Idle
+            };
+            let frame = loader.step(input);
+            credit = frame.credit;
+            let (address, data) = frame.bus.map_or((0, 0), |word| (word.address, word.data));
+            tick(&mut vm, address, data, frame.write);
+            if let Some(word) = frame.committed {
+                assert_eq!(word.address, ENTRY_ADDRESS + 8 * confirmed as u64);
+                assert_eq!(word.data, words[confirmed]);
+                confirmed += 1;
+            }
+            for (i, &word) in words.iter().enumerate() {
+                let expected = if i < confirmed { word } else { 0 };
+                assert_eq!(stored(&vm, ENTRY_ADDRESS + 8 * i as u64, 15), expected, "tick {cycle}");
+            }
+            if frame.cpu_ready {
+                assert_eq!(confirmed, words.len());
+                return;
+            }
+        }
+        panic!("全語を確定して RAM を CPU へ渡すまでの上限を超えた");
+    }
+
+    #[test]
+    fn continuous_rx_loads_every_word_without_a_sender_ack() {
+        use ncg2_uart_loader::{Acceptance, BootLoader, ENTRY_ADDRESS, Receive};
+
+        let snapshots = [
+            ("rx.ncg2", include_str!("../../../circuit/uart-rx.ncg2")),
+            ("word.ncg2", include_str!("../../../circuit/uart-word-buffer.ncg2")),
+            ("receiver.ncg2", "(using nor)
+                (namespace rv64
+                  (export raw-receiver)
+                  (module raw-receiver (in rx ack) (out (word (bits 64)) ready error)
+                    (def (byte valid framing-error) (uart-rx rx))
+                    (def (word ready error) (uart-word-buffer byte valid framing-error ack))))"),
+        ].map(|(path, text)| SourceSnapshot { path, text, revision: 0 });
+        let mut receiver = lower_snapshots(&snapshots, "raw-receiver").unwrap();
+        let mut output = receiver.reset();
+        let mut ram = lower("uart-ram").unwrap();
+        let mut loader = BootLoader::reset();
+        let words = [0x7168_c033_14c4_f37a, 0xf0ff_0133_6789_9421, 0x0000_006f_0262_b023];
+        let wire = [words.len() as u64].into_iter().chain(words).flat_map(u64::to_le_bytes).flat_map(|byte| {
+            std::iter::once(false)
+                .chain((0..8).map(move |bit| (byte >> bit) & 1 != 0))
+                .chain(std::iter::once(true))
+                .flat_map(|level| std::iter::repeat_n(level, 16))
+        });
+
+        let mut delivered = false;
+        let mut confirmed = 0;
+        let mut ready = false;
+        for rx in std::iter::repeat_n(true, 16).chain(wire).chain(std::iter::repeat_n(true, 80)) {
+            assert!(!output[65]);
+            let input = if output[64] && !delivered {
+                let word = output[..64].iter().enumerate().fold(0, |word, (bit, &value)| {
+                    word | (u64::from(value) << bit)
+                });
+                Receive::Word(word)
+            } else {
+                Receive::Idle
+            };
+            let frame = loader.step(input);
+            let ack = matches!(frame.accepted, Acceptance::Header | Acceptance::Payload);
+            assert!(!matches!(frame.accepted, Acceptance::Rejected(_)));
+            delivered = output[64] && (delivered || ack);
+            output = receiver.step(&[rx, ack]).unwrap();
+
+            let (address, data) = frame.bus.map_or((0, 0), |word| (word.address, word.data));
+            tick(&mut ram, address, data, frame.write);
+            if let Some(word) = frame.committed {
+                assert_eq!(word.address, ENTRY_ADDRESS + 8 * confirmed as u64);
+                assert_eq!(word.data, words[confirmed]);
+                assert_eq!(stored(&ram, word.address, 15), word.data);
+                confirmed += 1;
+            }
+            if frame.cpu_ready {
+                assert_eq!(confirmed, words.len());
+                ready = true;
+            }
+        }
+        assert!(ready);
     }
 
     #[test]
