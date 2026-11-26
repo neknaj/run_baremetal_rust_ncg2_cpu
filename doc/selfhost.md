@@ -122,6 +122,23 @@ cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
 
 照合に使った UART 転送データは270,232バイトで、SHA-256 は `d7244ea205d4dd5ade1cc54d58d05fd5a9af1035410960035a3430656b423473`。この結果は上記の回路ソースと入力を組み込んだ実行についての記録である。
 
+### 連続 UART で転送する
+
+`uart-loader.toml` では8N1の波形を続けて送り、語ごとの ACK は受信器と FIFO の間で処理する。ビットの長さは従来と同じ16 tick。受信器、RAM、CPU は NCG2 で記述し、FIFO と書き込み制御は Verus で検証した Rust を使う。ホスト側の検証器は各語が物理 RAM に確定した時点で内容を照合し、全語を再照合してから CPU の退役を追う。
+
+```sh
+host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
+  --target "$host" --example verify_uart_selfhost -- --continuous uart-loader.toml \
+  selfhost/target/compile-uart.bin selfhost/target/compile-qemu.log 2b800113 120000000
+```
+
+転送と RAM の照合だけを測る場合は、同じ実行ファイルを `--measure-continuous uart-loader.toml selfhost/target/compile-uart.bin 33778` で起動する。先頭区間を測る場合は最後の語数を減らす。送信するヘッダーには元の全語数が入るため、その場合は CPU への引き渡しまで進まない。
+
+上の33,778語を送った Windows の release 計測では、最後の RAM 書き込みが tick 43,237,191、CPU への引き渡しが tick 43,237,192 だった。送信開始から全語の RAM 照合までに16.216秒かかった。回路の構築と引き渡し後の実行は別に計測する。連続転送で表示するアプリの tick 数は RAM を引き渡した時点から数える。[計測条件と比較](https://github.com/neknaj/run_baremetal_rust_ncg2_cpu/wiki/UART-performance)
+
+先頭1,600 tick の CPU・RAM 回路と先頭5,120 tick の受信器については、公開出力を標準 VM と毎 tick 照合する。以降は疎実行器で進め、受信語、RAM に確定した内容、CPU への引き渡しを検査する。FIFO の契約と切り替え回路の有界 SMT 検査は、この全量走行の検査と併用する。
+
 ### 回路ソースと入力を指定する
 
 別の1入力・1出力の `invert` を評価する場合は、最大128バイトの回路ソースと入力ビットを指定する。例えば入力1の要求を作る手順は次のとおり。
