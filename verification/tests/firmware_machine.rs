@@ -5,6 +5,7 @@ use circuitgame2_core::project::{
     ClockedModuleVmLimits, ModuleBodyPosition, SourceSnapshot, check_use_aliases,
     index_use_targets, parse_circuit_project,
 };
+use ncg2_rv64_arithmetic_proof::event_clocked::EventVm;
 
 fn machine(rom_override: Option<&str>) -> ClockedVm {
     let sources = [
@@ -83,6 +84,8 @@ fn machine(rom_override: Option<&str>) -> ClockedVm {
 fn runs_the_rust_elf_to_its_halt_loop() {
     let mut vm = machine(None);
     assert_eq!(vm.reset(), [false; 260]);
+    let mut sparse = EventVm::new(&vm).unwrap();
+    assert_eq!(sparse.output(), [false; 260]);
 
     // BSS 走査を1周し、Rust の結果を書き出し、終了後の自己ループへ戻る。
     let expected = [
@@ -98,6 +101,11 @@ fn runs_the_rust_elf_to_its_halt_loop() {
     let mut previous_commit = 0;
     for tick in 1..=100_000 {
         let output = vm.step(&product_address).unwrap();
+        assert_eq!(
+            sparse.step(&product_address).unwrap(),
+            output,
+            "tick {tick}"
+        );
         let pc = word(&output[..64]);
         assert!(
             !output[259],
@@ -147,13 +155,21 @@ fn runs_the_rust_elf_to_its_halt_loop() {
         ]
     );
     let output = vm.step(&product_address).unwrap();
+    assert_eq!(sparse.step(&product_address).unwrap(), output);
+    for index in 0..vm.storage_count() {
+        assert_eq!(sparse.ram_memory(index), vm.ram_memory(index));
+    }
     assert_eq!(word(&output[128..192]), 0x2fff8);
     assert_eq!(word(&output[64..128]), 0x0000_0005_0000_0003);
     let status_address = bits(0x2fff0);
     for _ in 0..39 {
-        vm.step(&status_address).unwrap();
+        assert_eq!(
+            sparse.step(&status_address).unwrap(),
+            vm.step(&status_address).unwrap()
+        );
     }
     let output = vm.step(&status_address).unwrap();
+    assert_eq!(sparse.step(&status_address).unwrap(), output);
     assert_eq!(word(&output[128..192]), 0x2fff0);
     assert_eq!(word(&output[64..128]), 1);
 }
