@@ -1,7 +1,7 @@
 //! 実際の NOR とラッチを tick ごとに展開し、完了通知から更新要求までを検査する。
 
 use circuitgame2_core::{
-    netlist::{ClockedStorageInputs, ClockedVm, NorNetlist, Wire},
+    netlist::ClockedVm,
     project::{
         ClockedModuleVmLimits, ModuleBodyPosition, SourceSnapshot, check_use_aliases,
         index_use_targets, parse_circuit_project,
@@ -10,8 +10,11 @@ use circuitgame2_core::{
 use std::{
     error::Error,
     io::{self, Write},
-    ops::Range,
 };
+
+#[path = "../latch_smt.rs"]
+mod latch_smt;
+use latch_smt::LatchNetwork;
 
 const HISTORY: usize = 6;
 
@@ -124,110 +127,19 @@ fn lower(controller: Controller) -> Result<ClockedVm, Box<dyn Error>> {
     Ok(compiled.vm)
 }
 
-/// 増補入力の先頭に外部入力を、続いてラッチの登録出力を置く借用配線。
-struct LatchNetwork<'a> {
-    nor: &'a NorNetlist,
-    external: usize,
-    latches: Vec<(&'a ClockedStorageInputs, Range<usize>)>,
-}
-
-impl<'a> LatchNetwork<'a> {
-    fn read(vm: &'a ClockedVm, controller: Controller) -> Result<Self, &'static str> {
-        let nor = vm.netlist();
-        let external = vm.external_input_count();
-        if (external, nor.outputs.len()) != controller.widths() {
-            return Err("ポート幅が完了制御の参照仕様と一致しない。");
-        }
-        let mut latches = Vec::with_capacity(vm.storage_count());
-        let mut start = external;
-        for index in 0..vm.storage_count() {
-            let (wiring, range) = vm
-                .storage_wiring(index)
-                .ok_or("状態素子の配線が見つからない。")?;
-            if wiring.address.is_some() {
-                return Err("この検証器はラッチ専用で、RAM を展開できない。");
-            }
-            if range.start != start || range.len() != wiring.data.len() {
-                return Err("ラッチ出力の順序または幅が増補入力と一致しない。");
-            }
-            start = range.end;
-            latches.push((wiring, range));
-        }
-        if start != nor.input_count {
-            return Err("外部入力とラッチ出力が増補入力の全域を覆わない。");
-        }
-        Ok(Self {
-            nor,
-            external,
-            latches,
-        })
+fn emit_differences(
+    network: &LatchNetwork<'_>,
+    out: &mut impl Write,
+    controller: Controller,
+    prefix: &str,
+    tick: usize,
+) -> io::Result<()> {
+    for (index, &wire) in network.nor.outputs.iter().enumerate() {
+        let observed = network.wire(wire, prefix, tick, tick);
+        let expected = controller.expected(tick, index);
+        writeln!(out, "    (distinct {observed} {expected})")?;
     }
-
-    // 更新式では開始時の状態、公開出力では確定後の状態を指定する。
-    fn wire(&self, wire: Wire, prefix: &str, frame: usize, state: usize) -> String {
-        match wire {
-            Wire::Input(index) if index < self.external => format!("i_{frame}_{index}"),
-            Wire::Input(index) => format!("{prefix}_q_{state}_{index}"),
-            Wire::Gate(index) => format!("{prefix}_g_{state}_{index}"),
-            Wire::Constant(value) => value.to_string(),
-        }
-    }
-
-    fn emit_state(&self, out: &mut impl Write, prefix: &str, from_reset: bool) -> io::Result<()> {
-        for (kind, indices) in [
-            ("g", 0..self.nor.gates.len()),
-            ("q", self.external..self.nor.input_count),
-        ] {
-            for index in indices {
-                let symbol = format!("{prefix}_{kind}_0_{index}");
-                if from_reset {
-                    writeln!(out, "(define-fun {symbol} () Bool false)")?;
-                } else {
-                    writeln!(out, "(declare-const {symbol} Bool)")?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn emit_step(&self, out: &mut impl Write, prefix: &str, frame: usize) -> io::Result<()> {
-        let prev = frame - 1;
-        let wire = |source| self.wire(source, prefix, frame, prev);
-        for (index, gate) in self.nor.gates.iter().enumerate() {
-            writeln!(
-                out,
-                "(define-fun {prefix}_g_{frame}_{index} () Bool (not (or {} {})))",
-                wire(gate.left),
-                wire(gate.right)
-            )?;
-        }
-        for (wiring, range) in &self.latches {
-            let enable = wire(wiring.enable);
-            for (index, &data) in range.clone().zip(&wiring.data) {
-                writeln!(
-                    out,
-                    "(define-fun {prefix}_q_{frame}_{index} () Bool (ite {enable} {} {prefix}_q_{prev}_{index}))",
-                    wire(data)
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn emit_differences(
-        &self,
-        out: &mut impl Write,
-        controller: Controller,
-        prefix: &str,
-        tick: usize,
-    ) -> io::Result<()> {
-        for (index, &wire) in self.nor.outputs.iter().enumerate() {
-            let observed = self.wire(wire, prefix, tick, tick);
-            let expected = controller.expected(tick, index);
-            writeln!(out, "    (distinct {observed} {expected})")?;
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 fn emit(
@@ -235,7 +147,10 @@ fn emit(
     controller: Controller,
     vm: &ClockedVm,
 ) -> Result<(), Box<dyn Error>> {
-    let network = LatchNetwork::read(vm, controller)?;
+    let network = LatchNetwork::read(vm)?;
+    if (network.external, network.nor.outputs.len()) != controller.widths() {
+        return Err("ポート幅が完了制御の参照仕様と一致しない。".into());
+    }
     writeln!(out, "(set-logic QF_BV)")?;
     writeln!(out, "(set-option :timeout 30000)")?;
     for tick in 0..=HISTORY {
@@ -256,10 +171,10 @@ fn emit(
     }
     writeln!(out, "(assert (or")?;
     for tick in 0..HISTORY {
-        network.emit_differences(out, controller, "reset", tick)?;
+        emit_differences(&network, out, controller, "reset", tick)?;
     }
     // 開始状態を任意にすると、6 tick 経過後は任意の時点へ同じ検査を適用できる。
-    network.emit_differences(out, controller, "arbitrary", HISTORY)?;
+    emit_differences(&network, out, controller, "arbitrary", HISTORY)?;
     writeln!(out, "))")?;
     writeln!(out, "(check-sat)")?;
     Ok(())

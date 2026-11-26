@@ -1,0 +1,107 @@
+(namespace rv64
+  (export uart-rx)
+
+  (latch uart-bit (width 1))
+  (latch uart-delay-2 (width 2))
+  (latch uart-byte (width 8))
+  (latch uart-arm-delay (width 12))
+  (latch uart-phase-64 (width 64))
+  (latch uart-phase-27 (width 27))
+
+  ;; 16 tick/bit の 8N1 を受信する。reset 後は RX を16 tick 以上 High に保つ。
+  ;; 待機中、直前4 tick が High の Low を開始とし、その tick を s とする。
+  ;; 開始、データ i、停止を s+8、s+24+16i、s+152 で採取する。データは LSB が先。
+  ;; 開始の中点が High なら破棄する。Low なら s+159 に停止 High で valid、
+  ;; 停止 Low で framing-error を1 tick 出す。byte は valid と同時に更新し保持する。
+  ;; stop と次の start が隣接する場合、フレームの開始間隔は160 tick。
+  (module uart-rx
+    (in rx)
+    (out (byte (bits 8)) valid framing-error)
+
+    ;; 受理経路の NOR が reset 後に落ち着くまで、トークンを注入しない。
+    (def arm-delay-tail (slice arm-delay 0 11))
+    (def next-arm-delay (concat 1 arm-delay-tail))
+    (def arm-delay (uart-arm-delay next-arm-delay 1))
+    (def armed (slice arm-delay 11 1))
+    (def history-tail (slice history 0 7))
+    (def next-history (concat rx history-tail))
+    (def history (uart-byte next-history 1))
+    (def previous-1 (slice history 0 1))
+    (def previous-2 (slice history 1 1))
+    (def previous-3 (slice history 2 1))
+    (def previous-8 (slice history 7 1))
+    (def not-previous-1 (nor previous-1 previous-1))
+    (def not-previous-2 (nor previous-2 previous-2))
+    (def not-previous-3 (nor previous-3 previous-3))
+    (def edge-first (nor previous-1 not-previous-1))
+    (def edge-prior (nor not-previous-2 not-previous-3))
+    (def missing-edge (nor edge-first edge-first))
+    (def missing-prior (nor edge-prior edge-prior))
+    (def edge (nor missing-edge missing-prior))
+    (def missing-history (nor edge edge))
+    ;; 4段後の history[7] を読むと、edge の直前4番目の RX に対応する。
+    (def not-older (nor previous-8 previous-8))
+    (def qualified-edge (nor missing-history not-older))
+    (def no-edge (nor qualified-edge qualified-edge))
+    (def request (nor no-edge busy))
+    (def take (uart-bit request armed))
+
+    ;; 次の開始候補は s+160 以降とする。停止の中点以降に RX が揺れても途中で解除しない。
+    (def busy-data-tail (slice busy-data 0 1))
+    (def next-busy-data (concat take busy-data-tail))
+    (def busy-data (uart-delay-2 next-busy-data 1))
+    (def keep-idle (nor take rearm))
+    (def busy-update (nor keep-idle keep-idle))
+    (def busy-next (slice busy-data 1 1))
+    (def busy (uart-bit busy-next busy-update))
+
+    ;; 1本のトークンを移動し、16 tick ごとの採取パルスを作る。
+    ;; 採取用ラッチには履歴を渡し、受理経路による遅延を補う。
+    (def phase-0-tail (slice phase-0 0 63))
+    (def next-phase-0 (concat take phase-0-tail))
+    (def phase-0 (uart-phase-64 next-phase-0 1))
+    (def phase-0-last (slice phase-0 63 1))
+    (def phase-1-tail (slice phase-1 0 63))
+    (def next-phase-1 (concat phase-0-last phase-1-tail))
+    (def phase-1 (uart-phase-64 next-phase-1 1))
+    (def phase-1-last (slice phase-1 63 1))
+    (def phase-2-tail (slice phase-2 0 26))
+    (def next-phase-2 (concat phase-1-last phase-2-tail))
+    (def phase-2 (uart-phase-27 next-phase-2 1))
+    (def rearm (slice phase-2 26 1))
+    (def stop-sample (slice phase-2 16 1))
+    (def sample-start-bit (slice phase-0 0 1))
+    (def start-bit (uart-bit previous-2 sample-start-bit))
+    (def sample-data-0 (slice phase-0 16 1))
+    (def data-0 (uart-bit previous-2 sample-data-0))
+    (def sample-data-1 (slice phase-0 32 1))
+    (def data-1 (uart-bit previous-2 sample-data-1))
+    (def sample-data-2 (slice phase-0 48 1))
+    (def data-2 (uart-bit previous-2 sample-data-2))
+    (def sample-data-3 (slice phase-1 0 1))
+    (def data-3 (uart-bit previous-2 sample-data-3))
+    (def sample-data-4 (slice phase-1 16 1))
+    (def data-4 (uart-bit previous-2 sample-data-4))
+    (def sample-data-5 (slice phase-1 32 1))
+    (def data-5 (uart-bit previous-2 sample-data-5))
+    (def sample-data-6 (slice phase-1 48 1))
+    (def data-6 (uart-bit previous-2 sample-data-6))
+    (def sample-data-7 (slice phase-2 0 1))
+    (def data-7 (uart-bit previous-2 sample-data-7))
+    (def stop-bit (uart-bit previous-2 stop-sample))
+
+    ;; 停止の両極性を同じ tick に用意し、確定バイトと通知を同時に登録する。
+    (def stop-low (nor stop-bit stop-bit))
+    (def stop-high (uart-bit stop-bit 1))
+    (def good (nor start-bit stop-low))
+    (def bad (nor start-bit stop-high))
+    (def no-good (nor good good))
+    (def no-bad (nor bad bad))
+    (def report (slice phase-2 19 1))
+    (def no-report (nor report report))
+    (def commit (nor no-report no-good))
+    (def reject (nor no-report no-bad))
+    (def valid (uart-bit commit armed))
+    (def framing-error (uart-bit reject armed))
+    (def collected (concat data-0 data-1 data-2 data-3 data-4 data-5 data-6 data-7))
+    (def byte (uart-byte collected commit))))
