@@ -98,3 +98,26 @@ cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
   --target "$host" --target-dir target/verification -- execute-divide > "$model"
 test "$(z3 -smt2 "$model")" = unsat
 ```
+
+## UART 実行用の除算フィクスチャ
+
+`verification/fixtures/division.S` は、除算と剰余の8命令を含む裸 RV64IM の命令列である。除算の直後にその結果を読む ADDI、結果が破棄される x0 宛ての除算、除算の間に置く MUL と MULHU を含む。ゼロ除算、64・32ビット最小値を −1 で割る場合、符号なし W の出力を符号拡張する場合も実行する。
+
+フィクスチャはセルフホストと同じ UART 用メモリ配置を使う。`0x103f00` から結果22語を RAM に書き、期待値表と照合する。成功時は `0x103ff0` に状態1、`0x103ff8` に件数22を書き込む。相違があれば状態4と、最初に異なった語の添字を0始まりで書き込む。`0x10068` の終了ループは既存の UART 検証器と共通である。
+
+リポジトリのルートで RV64 用 GNU binutils と `qemu-riscv64` を使う。QEMU の検証器は実行した命令をログから特定し、8つの除算・剰余命令、MUL・MULHU、x0 宛ての除算を実行したことを確認する。各結果語と予約領域も RAM から読み出す。
+
+```sh
+set -e
+work=target/verification/division
+mkdir -p "$work"
+riscv64-linux-gnu-as -march=rv64im -mabi=lp64 \
+  -o "$work/division.o" verification/fixtures/division.S
+riscv64-linux-gnu-ld --no-relax -T selfhost/memory-compile.x \
+  -o "$work/division.elf" "$work/division.o"
+python3 tools/verify_division_qemu.py "$work/division.elf" "$work/qemu.log" \
+  --result-out "$work/result.bin"
+python3 tools/elf_image.py "$work/division.elf" "$work/uart.bin" --format uart-boot
+```
+
+`uart.bin` と QEMU の参照ログ、結果2語のファイルは `verify_uart_selfhost` の `--circuit-loader` と `--result-file` に渡せる。
