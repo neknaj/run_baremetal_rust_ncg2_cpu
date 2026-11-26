@@ -1,4 +1,4 @@
-//! Core の標準 VM でセルフホスト用回路を実行し、QEMU の PC 遷移と RAM 結果を照合する。
+//! 展開したセルフホスト用回路を実行し、QEMU の PC 遷移と RAM 結果を照合する。
 
 use std::{error::Error, fs, path::Path};
 
@@ -9,10 +9,12 @@ use circuitgame2_core::{
         index_use_targets, parse_circuit_project,
     },
 };
+use ncg2_rv64_arithmetic_proof::event_clocked::EventVm;
 
 const ENTRY: u64 = 0x10000;
 const HALT: u64 = 0x10068;
 const INFORMATION: u64 = 0x07e0_0113;
+const CROSS_CHECK_TICKS: u64 = 14_500;
 
 fn machine(path: &Path) -> Result<ClockedVm, Box<dyn Error>> {
     let config = circuitgame2_project_config::parse(&fs::read(path)?)
@@ -107,8 +109,10 @@ fn word(bits: &[bool]) -> u64 {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let [project, trace, ticks] = args.as_slice() else {
-        return Err("引数には実行設定、QEMU の実行列、上限 tick 数を指定する。".into());
+    let (project, trace, ticks, use_event) = match args.as_slice() {
+        [project, trace, ticks] => (project, trace, ticks, false),
+        [project, trace, ticks, option] if option == "--event" => (project, trace, ticks, true),
+        _ => return Err("実行設定、QEMU の実行列、上限 tick 数を指定する。疎実行を使う場合は末尾に --event を付ける。".into()),
     };
     let limit = ticks
         .to_str()
@@ -116,13 +120,43 @@ fn main() -> Result<(), Box<dyn Error>> {
         .parse::<u64>()?;
     let reference = reference_pcs(Path::new(trace))?;
     let mut vm = machine(Path::new(project))?;
+    let mut event = if use_event {
+        Some(EventVm::new(&vm)?)
+    } else {
+        None
+    };
     let mut next = 1;
     let mut previous_pc = ENTRY;
-    vm.reset();
+    let reset = vm.reset();
+    if let Some(event) = event.as_mut() {
+        if event.reset() != reset {
+            return Err("標準 VM と疎実行で reset の出力が異なる。".into());
+        }
+    }
     for tick in 1..=limit {
-        let output = vm
-            .step(&[])
-            .map_err(|error| format!("tick {tick}: {error:?}"))?;
+        let standard_output;
+        let output = if let Some(event) = event.as_mut() {
+            let output = event
+                .step(&[])
+                .map_err(|error| format!("疎実行 tick {tick}: {error:?}"))?;
+            if tick <= CROSS_CHECK_TICKS {
+                let reference = vm
+                    .step(&[])
+                    .map_err(|error| format!("標準 VM tick {tick}: {error:?}"))?;
+                if output != reference {
+                    return Err(format!("tick {tick} で標準 VM と疎実行の出力が異なる。").into());
+                }
+                if tick == CROSS_CHECK_TICKS {
+                    eprintln!("標準 VM と疎実行の先頭 {CROSS_CHECK_TICKS} tick が一致した。");
+                }
+            }
+            output
+        } else {
+            standard_output = vm
+                .step(&[])
+                .map_err(|error| format!("標準 VM tick {tick}: {error:?}"))?;
+            &standard_output
+        };
         let pc = ENTRY.wrapping_add(word(&output[..64]));
         if output[193] {
             return Err(format!("tick {tick}、PC {pc:#x} で回路が停止した。").into());

@@ -53,7 +53,7 @@ ncg2 run --project selfhost.toml --ticks 16000000 | tail -n 1
 
 ## QEMU の PC 遷移との照合
 
-QEMU の `-one-insn-per-tb -d exec,nochain` で、起動から `boot_halt` に到達するまでを記録する。QEMU の入力領域には NCG2 の入力回路と同じ要求を設定する。次の検証コマンドは Core の標準 VM を使い、PC が変わるたびに参照と照合する。同じ PC で連続した命令完了は1回の遷移としても現れない。終了を検知したら RAM から取得した終了状態と結果を上記の期待値と照合する。
+QEMU の `-one-insn-per-tb -d exec,nochain` で、起動から `boot_halt` に到達するまでを記録する。QEMU の入力領域には NCG2 の入力回路と同じ要求を設定する。次の検証コマンドは Core の標準 VM を使い、PC が変化した位置を参照と照合する。終了を検知したら RAM から取得した終了状態と結果を上記の期待値と照合する。
 
 ```sh
 host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
@@ -61,3 +61,5 @@ cargo +1.99.1 run --locked --release --manifest-path verification/Cargo.toml \
   --target "$host" --target-dir target/verification --example verify_selfhost_run \
   -- selfhost.toml target/verification/qemu-trace.log 16000000
 ```
+
+引数の末尾に `--event` を付けると、実ネットリストを疎実行する。最初の14,500 tick は標準 VM でも進め、各 tick の公開出力の一致を確認する。疎実行器は開発時の検証に使う。標準 VM との一般の同値性を機械検証する作業は今後の課題である。[疎実行の状態更新](event-clocked.md)
