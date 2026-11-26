@@ -1,0 +1,53 @@
+(namespace rv64
+  (export register-file)
+
+  (memory register-store (address 5) (data (bits 64)))
+  (latch register-request (width 70))
+  (latch register-control (width 1))
+
+  ;; tick t（t >= 1）の入力を (a[t], d[t], w[t]) とし、M[t] をこの入力の処理後の記憶とする。
+  ;; M[0] の全語は0。tick t + 7 の確定時に、read-data = M[t-1](a[t]) を返す。
+  ;; w[t] = 1 かつ a[t] != 0 のときだけ a[t] を d[t] に更新し、それ以外の語は保持する。
+  ;; 初期値 M[0](0) = 0 と書き込み条件から、すべての t で M[t](0) = 0。
+  ;; tick 0 から7の出力は0。入力は1 tick で受け付け、次の入力を翌 tick に受け付ける。
+  ;; 根拠は Core のラッチ更新、RAM の read-first 更新、VM の同時確定の契約。
+  (module register-file
+    (in (index (bits 5)) (write-data (bits 64)) write-enable)
+    (out (read-data (bits 64)))
+
+    ;; アドレス・データと、そのフレームが入力済みであることを示すビットを遅延させる。
+    (def incoming (concat index write-data 1))
+    (def request-1 (register-request incoming 1))
+    (def request-2 (register-request request-1 1))
+    (def request-3 (register-request request-2 1))
+    (def request-4 (register-request request-3 1))
+    (def request-5 (register-request request-4 1))
+    (def request-6 (register-request request-5 1))
+    (def request-7 (register-request request-6 1))
+
+    ;; 各ペアを正極性に戻してから集約し、ビット4と許可ビットも同じ入力フレームにそろえる。
+    (def low-pair-zero (nor (bit index 0) (bit index 1)))
+    (def high-pair-zero (nor (bit index 2) (bit index 3)))
+    (def low-pair-nonzero (nor low-pair-zero low-pair-zero))
+    (def high-pair-nonzero (nor high-pair-zero high-pair-zero))
+    (def low-four-zero (nor low-pair-nonzero high-pair-nonzero))
+    (def low-four-nonzero (nor low-four-zero low-four-zero))
+    (def bit-four-1 (register-control (bit index 4) 1))
+    (def bit-four-2 (register-control bit-four-1 1))
+    (def bit-four-3 (register-control bit-four-2 1))
+    (def bit-four-4 (register-control bit-four-3 1))
+    (def index-zero (nor low-four-nonzero bit-four-4))
+    (def disabled-1 (nor write-enable write-enable))
+    (def disabled-2 (register-control disabled-1 1))
+    (def disabled-3 (register-control disabled-2 1))
+    (def disabled-4 (register-control disabled-3 1))
+    (def disabled-5 (register-control disabled-4 1))
+    (def write-nonzero (nor index-zero disabled-5))
+
+    ;; t + 5 に書き込みの可否と有効ビットがそろい、t + 6 に許可を登録する。
+    ;; 最初の入力が届くまでは有効ビットが0なので、NOR の過渡値を RAM の許可へ伝えない。
+    (def ready-to-register (bit request-6 69))
+    (def write-to-ram (register-control write-nonzero ready-to-register))
+    (def address (slice request-7 0 5))
+    (def data (slice request-7 5 64))
+    (def read-data (register-store address data write-to-ram))))

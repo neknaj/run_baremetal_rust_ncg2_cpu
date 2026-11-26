@@ -4,7 +4,7 @@ Neknaj Circuit Game 2 で RV64IM の CPU を組み、ベアメタル Rust のプ
 
 ## 命令デコーダを試す
 
-`circuit/decode.ncg2` は、32ビット命令語から opcode、レジスタ番号、funct3、funct7 と、64ビットに符号拡張した I・S・B・U・J 形式の即値を取り出す。命令形式の選択、レジスタの更新、メモリアクセスは後続の回路で扱う。
+`circuit/decode.ncg2` は、32ビット命令語から opcode、レジスタ番号、funct3、funct7 と、64ビットに符号拡張した I・S・B・U・J 形式の即値を取り出す。命令形式の選択、レジスタへの書き戻し、メモリアクセスは制御回路で扱う。
 
 ```sh
 ncg2 check circuit/decode.ncg2
@@ -23,6 +23,19 @@ ncg2 run --entry ::rv64::program-counter --input 1000000000000000000000000000000
 ```
 
 先頭行はリセット直後の出力で、後続の行は各 tick の確定後の出力。最初の入力は `next-offset = 1` と `write-enable = 1` を指定する。次の tick では許可ビットが0なのでオフセット1を保持する。出力を最下位ビットから読むと、オフセットは順に `0, 1, 1` となる。ラッチの更新と観測は [NCG2 の tick と状態素子の仕様](https://neknaj.github.io/circuitgame2/docs/simulation.html#状態素子) に従う。
+
+## レジスタファイルを試す
+
+`circuit/register-file.ncg2` の `::rv64::register-file` は、5ビットの `index`、64ビットの `write-data`、1ビットの `write-enable` を受け付ける。入力した tick を `t` とすると、`t + 7` の出力 `read-data` はその入力が指定したレジスタの更新前の値である。書き込みを許可した場合は同じ tick に新しい値も確定する。レジスタ `x0` への書き込みは無効であり、読み出しは常に0。tick 0 から7の出力は0であり、最初の要求の結果は tick 8 に現れる。
+
+アドレスと書き込み入力は各 tick に1回ずつ与えられる。有効な書き込みの直後に同じレジスタを読むと、直前の書き込みが反映される。例えば tick 1 に `x1` へ42を書き、tick 2 に `x1` を読むと、tick 8 の出力は0、tick 9 の出力は42になる。後段の状態素子が tick 9 の読み出し結果を使うのは tick 10 からである。
+
+```sh
+ncg2 check circuit/decode.ncg2 circuit/register-file.ncg2
+ncg2 run --entry ::rv64::register-file circuit/decode.ncg2 circuit/register-file.ncg2
+```
+
+`run` に `--input` を追加すると、1入力につき1 tick 進む。各ポートのビットは最下位から並べ、入力を処理するまで次の入力で進める。更新と観測は [NCG2 の tick と状態素子の仕様](https://neknaj.github.io/circuitgame2/docs/simulation.html#状態素子) に従う。
 
 ## 起動 ELF を作る
 
