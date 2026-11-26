@@ -1,51 +1,24 @@
 //! 入力や状態が変わった素子だけを、同期回路の tick に従って再評価する。
 
 use circuitgame2_core::netlist::{ClockedVm, TickInputError, Wire};
-use ncg2_event_queue::EvaluationQueue;
+use ncg2_event_queue::{
+    EvaluationQueue,
+    fanout::{Pin, ReverseDependencies, StoragePins},
+};
 use std::ops::Range;
 
-#[derive(Clone, Copy)]
-enum Pin {
-    Slot(usize),
-    Constant(bool),
-}
-
-impl Pin {
-    fn from_wire(wire: Wire, augmented: usize) -> Self {
-        match wire {
-            Wire::Input(index) => Self::Slot(index),
-            Wire::Gate(index) => Self::Slot(augmented + index),
-            Wire::Constant(value) => Self::Constant(value),
-        }
+fn pin_for_wire(wire: Wire, augmented: usize) -> Pin {
+    match wire {
+        Wire::Input(index) => Pin::Slot(index),
+        Wire::Gate(index) => Pin::Slot(augmented + index),
+        Wire::Constant(value) => Pin::Constant(value),
     }
-
-    fn read(self, values: &[bool]) -> bool {
-        match self {
-            Self::Slot(index) => values[index],
-            Self::Constant(value) => value,
-        }
-    }
-
-    fn connect(self, users: &mut [Vec<usize>], target: usize) {
-        if let Self::Slot(index) = self {
-            let uses = &mut users[index];
-            if uses.last() != Some(&target) {
-                uses.push(target);
-            }
-        }
-    }
-}
-
-struct Ram {
-    address: Vec<Pin>,
-    bits: Vec<bool>,
 }
 
 struct Storage {
     output: Range<usize>,
-    data: Vec<Pin>,
-    enable: Pin,
-    ram: Option<Ram>,
+    pins: StoragePins,
+    ram: Option<Vec<bool>>,
 }
 
 /// Core の展開済み配線で、変化のある素子を再評価する検証用の実行器。
@@ -59,9 +32,7 @@ pub struct EventVm {
     storage: Vec<Storage>,
     // 増補入力、NOR の登録出力の順に配置する。
     values: Vec<bool>,
-    // 素子の添字に続けて公開出力の添字を割り当てる。
-    users: Vec<Vec<usize>>,
-    dependent_nodes: Vec<usize>,
+    users: ReverseDependencies,
     queue: EvaluationQueue,
     changes: Vec<(usize, bool)>,
     ram_writes: Vec<(usize, usize)>,
@@ -91,10 +62,7 @@ impl EventVm {
             .len()
             .checked_add(vm.storage_count())
             .ok_or("素子の添字が範囲外。")?;
-        nodes
-            .checked_add(net.outputs.len())
-            .ok_or("公開出力の添字が範囲外。")?;
-        let pin = |wire| Pin::from_wire(wire, augmented);
+        let pin = |wire| pin_for_wire(wire, augmented);
         let gates: Vec<_> = net
             .gates
             .iter()
@@ -112,7 +80,7 @@ impl EventVm {
                 return Err("状態素子の出力区間が増補入力の配置と異なる。");
             }
             next = output.end;
-            let ram = if let Some(address) = &wiring.address {
+            let (address, ram) = if let Some(address) = &wiring.address {
                 let bits = vm.ram_memory(index).ok_or("RAM に記憶領域がない。")?.len();
                 let expected = u32::try_from(address.len())
                     .ok()
@@ -121,17 +89,20 @@ impl EventVm {
                 if expected != Some(bits) {
                     return Err("RAM の容量がアドレス幅と語幅に合わない。");
                 }
-                Some(Ram {
-                    address: address.iter().copied().map(pin).collect(),
-                    bits: vec![false; bits],
-                })
+                (
+                    address.iter().copied().map(pin).collect(),
+                    Some(vec![false; bits]),
+                )
             } else {
-                None
+                (Vec::new(), None)
             };
             storage.push(Storage {
                 output,
-                data: wiring.data.iter().copied().map(pin).collect(),
-                enable: pin(wiring.enable),
+                pins: StoragePins {
+                    address,
+                    data: wiring.data.iter().copied().map(pin).collect(),
+                    enable: pin(wiring.enable),
+                },
                 ram,
             });
         }
@@ -139,29 +110,13 @@ impl EventVm {
             return Err("外部入力と状態素子で増補入力の全域を覆わない。");
         }
 
-        let mut users = vec![Vec::new(); slots];
-        for (index, &(left, right)) in gates.iter().enumerate() {
-            left.connect(&mut users, index);
-            right.connect(&mut users, index);
-        }
-        for (index, device) in storage.iter().enumerate() {
-            let node = gates.len() + index;
-            device.enable.connect(&mut users, node);
-            for &data in &device.data {
-                data.connect(&mut users, node);
-            }
-            if let Some(ram) = &device.ram {
-                for &address in &ram.address {
-                    address.connect(&mut users, node);
-                }
-            }
-        }
-        let dependent_nodes = users.iter().map(Vec::len).collect();
-        let mut reset_output = Vec::with_capacity(net.outputs.len());
-        for (index, &wire) in net.outputs.iter().enumerate() {
-            pin(wire).connect(&mut users, nodes + index);
-            reset_output.push(wire == Wire::Constant(true));
-        }
+        let storage_pins: Vec<_> = storage.iter().map(|device| &device.pins).collect();
+        let outputs: Vec<_> = net.outputs.iter().copied().map(pin).collect();
+        let users = ReverseDependencies::build(slots, &gates, &storage_pins, &outputs)?;
+        let reset_output: Vec<_> = outputs
+            .iter()
+            .map(|pin| matches!(pin, Pin::Constant(true)))
+            .collect();
         let output = reset_output.clone();
         Ok(Self {
             external,
@@ -170,7 +125,6 @@ impl EventVm {
             storage,
             values: vec![false; slots],
             users,
-            dependent_nodes,
             queue: EvaluationQueue::new_all(nodes),
             changes: Vec::with_capacity(slots),
             ram_writes: Vec::with_capacity(vm.storage_count()),
@@ -186,7 +140,7 @@ impl EventVm {
         self.values.fill(false);
         for device in &mut self.storage {
             if let Some(ram) = &mut device.ram {
-                ram.bits.fill(false);
+                ram.fill(false);
             }
         }
         self.queue.reset_all();
@@ -204,7 +158,7 @@ impl EventVm {
     ///
     /// 語はアドレスの昇順、語内のビットは最下位から並ぶ。ラッチと範囲外の添字は `None` を返す。
     pub fn ram_memory(&self, index: usize) -> Option<&[bool]> {
-        Some(&self.storage.get(index)?.ram.as_ref()?.bits)
+        self.storage.get(index)?.ram.as_deref()
     }
 
     /// 毎 tick 全体を走査する場合に訪れる NOR と状態素子の数。
@@ -256,7 +210,7 @@ impl EventVm {
             let device = &mut self.storage[index];
             let ram = device.ram.as_mut().expect("書き込み候補は RAM だけ");
             let word = &self.write_data[device.output.clone()];
-            ram.bits[start..start + word.len()].copy_from_slice(word);
+            ram[start..start + word.len()].copy_from_slice(word);
 
             // 同じ入力のままでも、次の read-first 読み出しは新しい語を読む。
             let node = self.gates.len() + index;
@@ -271,24 +225,26 @@ impl EventVm {
             return;
         }
         self.values[slot] = value;
-        let (nodes, outputs) = self.users[slot].split_at(self.dependent_nodes[slot]);
+        let (nodes, outputs) = self
+            .users
+            .readers(slot)
+            .expect("値の列と逆引き表は同じ配線番号を使う");
         self.queue.insert_all(nodes);
-        let base = self.queue.node_count();
         for &target in outputs {
-            self.output[target - base] = value;
+            self.output[target] = value;
         }
     }
 
     fn evaluate_storage(&mut self, index: usize) {
         let device = &self.storage[index];
-        let enabled = device.enable.read(&self.values);
+        let enabled = device.pins.enable.read(&self.values);
         if let Some(ram) = &device.ram {
             let mut word = 0;
-            for (bit, &pin) in ram.address.iter().enumerate() {
+            for (bit, &pin) in device.pins.address.iter().enumerate() {
                 word |= usize::from(pin.read(&self.values)) << bit;
             }
             let start = word * device.output.len();
-            let read = &ram.bits[start..start + device.output.len()];
+            let read = &ram[start..start + device.output.len()];
             for (slot, &value) in device.output.clone().zip(read) {
                 if self.values[slot] != value {
                     self.changes.push((slot, value));
@@ -296,7 +252,7 @@ impl EventVm {
             }
             if enabled {
                 let mut changed = false;
-                for ((slot, &pin), &old) in device.output.clone().zip(&device.data).zip(read) {
+                for ((slot, &pin), &old) in device.output.clone().zip(&device.pins.data).zip(read) {
                     let value = pin.read(&self.values);
                     changed |= value != old;
                     self.write_data[slot] = value;
@@ -306,7 +262,7 @@ impl EventVm {
                 }
             }
         } else if enabled {
-            for (slot, &pin) in device.output.clone().zip(&device.data) {
+            for (slot, &pin) in device.output.clone().zip(&device.pins.data) {
                 let value = pin.read(&self.values);
                 if self.values[slot] != value {
                     self.changes.push((slot, value));

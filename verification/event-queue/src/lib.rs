@@ -3,6 +3,8 @@
 #![no_std]
 extern crate alloc;
 
+pub mod fanout;
+
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
