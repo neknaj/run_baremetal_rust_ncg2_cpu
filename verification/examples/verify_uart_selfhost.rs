@@ -68,7 +68,7 @@ impl Machine {
         if !matches!(self.loader, Loader::Host) {
             self.frame[0] = rx;
         }
-        self.step_frame()
+        self.step_frame(false)
     }
 
     fn drive_loader(&mut self, frame: BootFrame) -> Result<bool, Box<dyn Error>> {
@@ -82,10 +82,10 @@ impl Machine {
         }
         self.frame[192] = frame.write;
         self.frame[193] = frame.cpu_ready;
-        self.step_frame()
+        self.step_frame(false)
     }
 
-    fn step_frame(&mut self) -> Result<bool, Box<dyn Error>> {
+    fn step_frame(&mut self, reuse_inputs: bool) -> Result<bool, Box<dyn Error>> {
         if self.tick >= self.limit {
             return Err(format!(
                 "上限 {} tick までに終了しなかった。PC={:#x}",
@@ -96,10 +96,11 @@ impl Machine {
         }
         self.tick += 1;
         let frame = if matches!(self.loader, Loader::Host) { &self.frame[..] } else { &self.frame[..65] };
-        let output = self
-            .event
-            .step(frame)
-            .map_err(|error| format!("tick {}: {error:?}", self.tick))?;
+        let output = if reuse_inputs {
+            self.event.step_reusing_inputs()
+        } else {
+            self.event.step(frame).map_err(|error| format!("tick {}: {error:?}", self.tick))?
+        };
         if self.tick <= STANDARD_TICKS
             && self
                 .reference
@@ -492,8 +493,16 @@ fn verify_execution_pcs(
     reference: &[u64],
     prefix_only: bool,
 ) -> Result<u64, Box<dyn Error>> {
+    let enabled = std::env::var_os("NCG2_BENCH_REUSE_EXECUTION_INPUTS").is_some();
+    let mut reuse_inputs = false;
+    let mut advance = |machine: &mut Machine| {
+        // 最初は RX のアイドルを通常の入口から適用する。以降は同じ入力を保つ。
+        let result = if reuse_inputs { machine.step_frame(true) } else { machine.step(true) };
+        reuse_inputs = enabled;
+        result
+    };
     while machine.pc() < ENTRY {
-        machine.step(true)?;
+        advance(machine)?;
     }
     let start = machine.tick;
     let mut retired = 0;
@@ -524,7 +533,7 @@ fn verify_execution_pcs(
                 );
             }
         }
-        machine.step(true)?;
+        advance(machine)?;
     }
     Ok(machine.tick - start)
 }

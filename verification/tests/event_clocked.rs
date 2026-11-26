@@ -30,7 +30,7 @@ fn writes_become_visible_on_the_next_read_first_tick_with_no_input_changes() {
         assert_eq!(sparse.output(), [false, true]);
         assert_eq!(sparse.ram_memory(0), Some([false, false].as_slice()));
         for (evaluation_count, read) in [(1, false), (1, true), (0, true)] {
-            assert_eq!(sparse.step(&[]).unwrap(), core.step(&[]).unwrap());
+            assert_eq!(sparse.step_reusing_inputs(), core.step(&[]).unwrap());
             assert_eq!(sparse.output(), [read, true]);
             assert_eq!(sparse.ram_memory(0), Some([true, false].as_slice()));
             assert_eq!(sparse.evaluated_last_tick(), evaluation_count);
@@ -104,6 +104,7 @@ fn mixes_ram_feedback_latch_and_direct_output_in_the_same_old_state() {
         assert_eq!(sparse.reset(), core.reset());
         let mut input = [false; 4];
         for tick in 1..=2048 {
+            let prior = input;
             if tick % 4 == 1 {
                 seed ^= seed << 13;
                 seed ^= seed >> 17;
@@ -116,11 +117,12 @@ fn mixes_ram_feedback_latch_and_direct_output_in_the_same_old_state() {
                 assert_eq!(core.step(&[false]), Err(TickInputError::InputCount));
                 assert_eq!(sparse.output(), previous);
             }
-            assert_eq!(
-                sparse.step(&input).unwrap(),
-                core.step(&input).unwrap(),
-                "反復 {iteration} の tick {tick}"
-            );
+            let output = if input == prior {
+                sparse.step_reusing_inputs()
+            } else {
+                sparse.step(&input).unwrap()
+            };
+            assert_eq!(output, core.step(&input).unwrap(), "反復 {iteration} の tick {tick}");
             assert_eq!(sparse.output()[0], input[3]);
             assert_eq!(sparse.output()[6], tick % 2 == 1);
             for i in 0..=core.storage_count() {
@@ -156,6 +158,7 @@ fn grouped_latch_lanes_match_scalar_shift_at_each_tick() {
     for _ in 0..2 {
         assert_eq!(grouped.reset(), core.reset());
         assert_eq!(shifted.reset(), grouped.output());
+        let mut prior = false;
         for tick in 1..=145 {
             let value = [1, 3, 7, 64, 67].contains(&tick);
             assert_eq!(
@@ -163,7 +166,13 @@ fn grouped_latch_lanes_match_scalar_shift_at_each_tick() {
                 core.step(&[value]).unwrap(),
                 "tick {tick}",
             );
-            assert_eq!(shifted.step(&[value]).unwrap(), grouped.output(), "tick {tick}");
+            let incremental = if value == prior {
+                shifted.step_reusing_inputs()
+            } else {
+                shifted.step(&[value]).unwrap()
+            };
+            assert_eq!(incremental, grouped.output(), "tick {tick}");
+            prior = value;
         }
     }
 }

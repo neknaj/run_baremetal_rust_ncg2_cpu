@@ -224,7 +224,14 @@ impl EventVm {
                 self.publish(slot, value);
             }
         }
+        Ok(self.step_reusing_inputs())
+    }
 
+    /// 外部入力の確定値を保ったまま回路だけを1 tick 進める。
+    ///
+    /// 直前の tick に適用した入力を使う。構築または reset の直後は入力がすべて0である。
+    /// 同じ入力を渡した [`Self::step`] と同じ評価・確定処理で、入力の照合を省く。
+    pub fn step_reusing_inputs(&mut self) -> &[bool] {
         self.evaluated = self.queue.pending_count();
         while let Some(node) = self.queue.pop() {
             if node < self.nor.gate_count() {
@@ -252,7 +259,7 @@ impl EventVm {
             self.queue.insert(node);
         }
         self.ram_writes.clear();
-        Ok(&self.output)
+        &self.output
     }
 
     fn publish(&mut self, slot: usize, value: bool) {
