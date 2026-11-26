@@ -57,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | "execute-logic"
         | "mul-round"
         | "div-round"
+        | "div-wide-next"
         | "firmware-dispatch"
         | "firmware-dispatch-core"
         | "firmware-dispatch-uart"
@@ -124,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "execute-logic.ncg2",
         ],
         "mul-round" => &["decode.ncg2", "arithmetic.ncg2", "multiply.ncg2"],
-        "div-round" => &["decode.ncg2", "arithmetic.ncg2", "divide.ncg2"],
+        "div-round" | "div-wide-next" => &["decode.ncg2", "arithmetic.ncg2", "divide.ncg2"],
         "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => {
             &dispatch_sources
         }
@@ -225,6 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-logic" => (160, 67),
         "mul-round" => (386, 257),
         "div-round" => (129, 65),
+        "div-wide-next" => (387, 258),
         "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => (417, 266),
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
@@ -242,6 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-logic" => Some(31),
         "mul-round" => Some(457),
         "div-round" => Some(462),
+        "div-wide-next" => Some(480),
         "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => Some(505),
         "uart-ram-map" => Some(31),
         _ => None,
@@ -304,6 +307,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("(define-fun next-remainder () (_ BitVec 64) {next_remainder})");
         println!("(define-fun quotient-bit () Bool {})", name(outputs[64]));
         print!("{}", include_str!("div_round.smt2"));
+    } else if selected == "div-wide-next" {
+        for (port, start) in [
+            ("dividend", 0), ("input-divisor", 64), ("quotient", 129), ("remainder", 193),
+            ("divisor", 257), ("mark", 321),
+        ] {
+            let word = vector((start..start + 64).map(|index| format!("i{index}")));
+            println!("(define-fun {port} () (_ BitVec 64) {word})");
+        }
+        for (port, index) in [("initialize", 128), ("running", 385), ("done", 386)] {
+            println!("(define-fun {port} () Bool i{index})");
+        }
+        for (port, start) in [
+            ("next-quotient", 0), ("next-remainder", 64), ("next-divisor", 128), ("next-mark", 192),
+        ] {
+            let word = vector(outputs[start..start + 64].iter().copied().map(name));
+            println!("(define-fun {port} () (_ BitVec 64) {word})");
+        }
+        println!("(define-fun next-running () Bool {})", name(outputs[256]));
+        println!("(define-fun next-done () Bool {})", name(outputs[257]));
+        print!("{}", include_str!("div_wide_next.smt2"));
     } else if selected == "mul-round" {
         multiply::emit(outputs);
     } else if matches!(

@@ -251,6 +251,39 @@ pub proof fn signed_divide_rv64(bits: Seq<bool>, dividend: int, divisor: int)
     signed_result_matches(dividend, divisor, bound, q, r);
 }
 
+/// 被除数と商が共用するレジスタは、未処理の被除数と確定した商を上位から順に持つ。
+pub proof fn quotient_register_order(dividend: Seq<bool>, produced: Seq<bool>, next: bool)
+    requires dividend.len() == 64, produced.len() < dividend.len(),
+    ensures ({
+        let unread = dividend.skip(produced.len() as int);
+        let register = unread + produced;
+        &&& register.len() == 64
+        &&& register[0] == dividend[produced.len() as int]
+        &&& register.skip(1).push(next) == dividend.skip(produced.len() as int + 1) + produced.push(next)
+    }),
+{
+    let unread = dividend.skip(produced.len() as int);
+    let register = unread + produced;
+    assert(register.skip(1) =~= unread.skip(1) + produced);
+    assert(unread.skip(1) =~= dividend.skip(produced.len() as int + 1));
+    assert(register.skip(1).push(next) =~= dividend.skip(produced.len() as int + 1) + produced.push(next));
+}
+
+/// 1から始まる目印のシフトは64回目で完了を指し、それ以前には指さない。
+pub proof fn division_round_mark(completed: u64)
+    requires completed < 64,
+    ensures
+        ((1u64 << completed) >> 63 & 1 == 1) == (completed == 63),
+        (completed < 63 ==> ((1u64 << completed) << 1) == (1u64 << ((completed + 1) as u64))),
+        (completed == 63 ==> ((1u64 << completed) << 1) == 0),
+{
+    assert(
+        (((1u64 << completed) >> 63 & 1 == 1) == (completed == 63))
+        && (completed < 63 ==> ((1u64 << completed) << 1) == (1u64 << ((completed + 1) as u64)))
+        && (completed == 63 ==> ((1u64 << completed) << 1) == 0)
+    ) by (bit_vector) requires completed < 64;
+}
+
 proof fn division_examples() {
     reveal_with_fuel(unsigned_divide, 5);
     assert(unsigned_divide(seq![true, false, true, true], 3) == (3nat, 2nat)) by (compute_only);
