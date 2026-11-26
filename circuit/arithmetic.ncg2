@@ -1,5 +1,5 @@
 (namespace rv64::arithmetic
-  (export add shift-left select)
+  (export add shift-left select xor compare-unsigned less-than-unsigned)
 
   ;; a XOR b と、その組の桁上がりを使う1ビットの加算段。
   (func add-bit (in a b carry-in) (out carry-out sum)
@@ -197,4 +197,169 @@
     (def low-32 (slice after-16 0 32))
     (def moved-32 (concat zeros-32 low-32))
     (def result (select shift-32 after-16 moved-32))
-  ))
+   )
+
+  (func xor-bit (in left right) (out result)
+    (def neither (nor left right))
+    (def only-left (nor right neither))
+    (def only-right (nor left neither))
+    (def equal (nor only-left only-right))
+    (def result (nor equal equal)))
+
+  (func xor-2
+    (in (left (bits 2)) (right (bits 2)))
+    (out (result (bits 2)))
+    (def left-low (slice left 0 1))
+    (def left-high (slice left 1 1))
+    (def right-low (slice right 0 1))
+    (def right-high (slice right 1 1))
+    (def low (xor-bit left-low right-low))
+    (def high (xor-bit left-high right-high))
+    (def result (concat low high)))
+
+  (func xor-4
+    (in (left (bits 4)) (right (bits 4)))
+    (out (result (bits 4)))
+    (def left-low (slice left 0 2))
+    (def left-high (slice left 2 2))
+    (def right-low (slice right 0 2))
+    (def right-high (slice right 2 2))
+    (def low (xor-2 left-low right-low))
+    (def high (xor-2 left-high right-high))
+    (def result (concat low high)))
+
+  (func xor-8
+    (in (left (bits 8)) (right (bits 8)))
+    (out (result (bits 8)))
+    (def left-low (slice left 0 4))
+    (def left-high (slice left 4 4))
+    (def right-low (slice right 0 4))
+    (def right-high (slice right 4 4))
+    (def low (xor-4 left-low right-low))
+    (def high (xor-4 left-high right-high))
+    (def result (concat low high)))
+
+  (func xor-16
+    (in (left (bits 16)) (right (bits 16)))
+    (out (result (bits 16)))
+    (def left-low (slice left 0 8))
+    (def left-high (slice left 8 8))
+    (def right-low (slice right 0 8))
+    (def right-high (slice right 8 8))
+    (def low (xor-8 left-low right-low))
+    (def high (xor-8 left-high right-high))
+    (def result (concat low high)))
+
+  (func xor-32
+    (in (left (bits 32)) (right (bits 32)))
+    (out (result (bits 32)))
+    (def left-low (slice left 0 16))
+    (def left-high (slice left 16 16))
+    (def right-low (slice right 0 16))
+    (def right-high (slice right 16 16))
+    (def low (xor-16 left-low right-low))
+    (def high (xor-16 left-high right-high))
+    (def result (concat low high)))
+
+  ;; 対応する入力ビットごとに XOR を計算し、元のビット順で返す。
+  (func xor
+    (in (left (bits 64)) (right (bits 64)))
+    (out (result (bits 64)))
+    (def left-low (slice left 0 32))
+    (def left-high (slice left 32 32))
+    (def right-low (slice right 0 32))
+    (def right-high (slice right 32 32))
+    (def low (xor-32 left-low right-low))
+    (def high (xor-32 left-high right-high))
+    (def result (concat low high)))
+
+  (func compare-bit (in left right) (out equal less)
+    (def neither (nor left right))
+    (def only-left (nor right neither))
+    (def less (nor left neither))
+    (def equal (nor only-left less)))
+
+  ;; 上位の比較が等しい場合に限り、下位の比較が小なりを決める。
+  (func combine-comparison
+    (in equal-low less-low equal-high less-high)
+    (out equal less)
+    (def unequal-low (nor equal-low equal-low))
+    (def unequal-high (nor equal-high equal-high))
+    (def equal (nor unequal-low unequal-high))
+    (def not-less-low (nor less-low less-low))
+    (def less-from-low (nor unequal-high not-less-low))
+    (def not-less (nor less-high less-from-low))
+    (def less (nor not-less not-less)))
+
+  (func compare-2
+    (in (left (bits 2)) (right (bits 2)))
+    (out equal less)
+    (def left-low (slice left 0 1))
+    (def left-high (slice left 1 1))
+    (def right-low (slice right 0 1))
+    (def right-high (slice right 1 1))
+    (def (equal-low less-low) (compare-bit left-low right-low))
+    (def (equal-high less-high) (compare-bit left-high right-high))
+    (def (equal less) (combine-comparison equal-low less-low equal-high less-high)))
+
+  (func compare-4
+    (in (left (bits 4)) (right (bits 4)))
+    (out equal less)
+    (def left-low (slice left 0 2))
+    (def left-high (slice left 2 2))
+    (def right-low (slice right 0 2))
+    (def right-high (slice right 2 2))
+    (def (equal-low less-low) (compare-2 left-low right-low))
+    (def (equal-high less-high) (compare-2 left-high right-high))
+    (def (equal less) (combine-comparison equal-low less-low equal-high less-high)))
+
+  (func compare-8
+    (in (left (bits 8)) (right (bits 8)))
+    (out equal less)
+    (def left-low (slice left 0 4))
+    (def left-high (slice left 4 4))
+    (def right-low (slice right 0 4))
+    (def right-high (slice right 4 4))
+    (def (equal-low less-low) (compare-4 left-low right-low))
+    (def (equal-high less-high) (compare-4 left-high right-high))
+    (def (equal less) (combine-comparison equal-low less-low equal-high less-high)))
+
+  (func compare-16
+    (in (left (bits 16)) (right (bits 16)))
+    (out equal less)
+    (def left-low (slice left 0 8))
+    (def left-high (slice left 8 8))
+    (def right-low (slice right 0 8))
+    (def right-high (slice right 8 8))
+    (def (equal-low less-low) (compare-8 left-low right-low))
+    (def (equal-high less-high) (compare-8 left-high right-high))
+    (def (equal less) (combine-comparison equal-low less-low equal-high less-high)))
+
+  (func compare-32
+    (in (left (bits 32)) (right (bits 32)))
+    (out equal less)
+    (def left-low (slice left 0 16))
+    (def left-high (slice left 16 16))
+    (def right-low (slice right 0 16))
+    (def right-high (slice right 16 16))
+    (def (equal-low less-low) (compare-16 left-low right-low))
+    (def (equal-high less-high) (compare-16 left-high right-high))
+    (def (equal less) (combine-comparison equal-low less-low equal-high less-high)))
+
+  ;; 二つの64ビット値を符号なしで比較し、等値、小なりの順に返す。
+  (func compare-unsigned
+    (in (left (bits 64)) (right (bits 64)))
+    (out equal less)
+    (def left-low (slice left 0 32))
+    (def left-high (slice left 32 32))
+    (def right-low (slice right 0 32))
+    (def right-high (slice right 32 32))
+    (def (equal-low less-low) (compare-32 left-low right-low))
+    (def (equal-high less-high) (compare-32 left-high right-high))
+    (def (equal less) (combine-comparison equal-low less-low equal-high less-high)))
+
+  ;; 左の値が右の値より小さい場合に1を返す。
+  (func less-than-unsigned
+    (in (left (bits 64)) (right (bits 64)))
+    (out less)
+    (def (equal less) (compare-unsigned left right))))
