@@ -1,4 +1,4 @@
-//! RAM の入力ピンをアドレス順に解釈し、対象の語を求める。
+//! RAM の容量、アドレスの読み取り、書き込みの採取と確定を扱う。
 
 use crate::fanout::Pin;
 use vstd::prelude::*;
@@ -97,6 +97,72 @@ pub fn ram_word_start(pins: &[Pin], values: &[bool], word_width: usize) -> (star
         requires word < pow2(pins@.len());
     assert((word as int + 1) * word_width == word * word_width + word_width) by (nonlinear_arith);
     word * word_width
+}
+
+/// 同じ tick の配線から書き込みデータを採取し、現在の語と異なるかを返す。
+///
+/// # Panics
+///
+/// データ端子が値の列の範囲外を指す場合、または一時領域か現在の語が端子数より短い場合に
+/// パニックする。呼び出し側は端子数と等しい幅の領域を渡す。
+#[inline]
+pub fn sample_ram_write(pins: &[Pin], values: &[bool], current: &[bool], word: &mut [bool]) -> (changed: bool)
+    requires
+        pins@.len() == old(word)@.len() == current@.len(),
+        forall|i: int| 0 <= i < pins@.len() ==> pin_fits(#[trigger] pins@[i], values@.len()),
+    ensures
+        final(word)@.len() == pins@.len(),
+        forall|i: int| 0 <= i < pins@.len() ==> #[trigger] final(word)@[i] == pins@[i].value_model(values@),
+        changed <==> final(word)@ != current@,
+{
+    let mut index = 0;
+    let mut changed = false;
+    assert(word@.take(0) =~= current@.take(0));
+    while index < pins.len()
+        invariant
+            index <= pins@.len() == word@.len() == current@.len(),
+            forall|i: int| 0 <= i < pins@.len() ==> pin_fits(#[trigger] pins@[i], values@.len()),
+            forall|i: int| 0 <= i < index ==> #[trigger] word@[i] == pins@[i].value_model(values@),
+            changed <==> word@.take(index as int) != current@.take(index as int),
+        decreases pins@.len() - index,
+    {
+        let value = pins[index].read(values);
+        let ghost prior = word@;
+        word[index] = value;
+        let differs = value != current[index];
+        proof {
+            assert(word@.take(index as int) =~= prior.take(index as int));
+            let bound = index as int + 1;
+            if !changed && !differs {
+                assert(word@.take(bound) =~= current@.take(bound));
+            } else if differs {
+                assert(word@.take(bound)[index as int] != current@.take(bound)[index as int]);
+            } else {
+                assert(word@.take(bound).take(index as int) =~= word@.take(index as int));
+                assert(current@.take(bound).take(index as int) =~= current@.take(index as int));
+            }
+        }
+        changed |= differs;
+        index += 1;
+    }
+    assert(word@.take(index as int) =~= word@);
+    assert(current@.take(index as int) =~= current@);
+    changed
+}
+
+/// 採取した語を指定の記憶区間に書き込み、その前後のビットを保つ。
+///
+/// # Panics
+///
+/// 語の先頭または末尾が記憶範囲を超える場合にパニックする。
+#[inline]
+pub fn commit_ram_write(memory: &mut [bool], start: usize, word: &[bool])
+    requires start + word@.len() <= old(memory)@.len(),
+    ensures final(memory)@ == old(memory)@.take(start as int) + word@ + old(memory)@.skip(start + word@.len()),
+{
+    let (_, tail) = memory.split_at_mut(start);
+    let (target, _) = tail.split_at_mut(word.len());
+    target.copy_from_slice(word);
 }
 
 } // verus!

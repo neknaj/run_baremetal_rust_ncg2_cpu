@@ -6,7 +6,7 @@ use ncg2_event_queue::{
     fanout::{Pin, ReverseDependencies, StoragePins},
     latch_lanes::{changed_lanes, evaluate_shift_pins, latch_input_layout},
     nor_inputs::PackedNorInputs,
-    ram_address::{ram_capacity, ram_word_start},
+    ram::{commit_ram_write, ram_capacity, ram_word_start, sample_ram_write},
     wire_updates::{publish_wire, publish_wire_updates},
 };
 use std::ops::Range;
@@ -250,7 +250,7 @@ impl EventVm {
             let device = &mut self.storage[index];
             let ram = device.ram.as_mut().expect("書き込み候補は RAM だけ");
             let word = &self.write_data[device.output.clone()];
-            ram[start..start + word.len()].copy_from_slice(word);
+            commit_ram_write(ram, start, word);
 
             // 同じ入力のままでも、次の read-first 読み出しは新しい語を読む。
             let node = self.nor.gate_count() + index;
@@ -276,12 +276,8 @@ impl EventVm {
                 }
             }
             if enabled {
-                let mut changed = false;
-                for ((slot, &pin), &old) in device.output.clone().zip(&device.pins.data).zip(read) {
-                    let value = pin.read(self.nor.read_only());
-                    changed |= value != old;
-                    self.write_data[slot] = value;
-                }
+                let word = &mut self.write_data[device.output.clone()];
+                let changed = sample_ram_write(&device.pins.data, self.nor.read_only(), read, word);
                 if changed {
                     self.ram_writes.push((index, start));
                 }
