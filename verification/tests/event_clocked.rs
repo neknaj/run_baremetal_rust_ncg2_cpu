@@ -133,3 +133,34 @@ fn mixes_ram_feedback_latch_and_direct_output_in_the_same_old_state() {
         }
     }
 }
+
+#[test]
+fn grouped_latch_lanes_match_scalar_shift_at_each_tick() {
+    use Wire::{Constant, Input};
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 65,
+        gates: vec![],
+        outputs: (1..=64).map(Input).collect(),
+    })
+    .unwrap();
+    let wiring = ClockedStorageInputs {
+        address: None,
+        data: (0..64).map(Input).collect(),
+        enable: Constant(true),
+    };
+    let mut core = ClockedVm::new(circuit, 1, vec![wiring], 64).unwrap();
+    let mut grouped = EventVm::new_with_latch_lanes(&core).unwrap();
+
+    for _ in 0..2 {
+        assert_eq!(grouped.reset(), core.reset());
+        for tick in 1..=145 {
+            let value = [1, 3, 7, 64, 67].contains(&tick);
+            assert_eq!(
+                grouped.step(&[value]).unwrap(),
+                core.step(&[value]).unwrap(),
+                "tick {tick}",
+            );
+        }
+    }
+}

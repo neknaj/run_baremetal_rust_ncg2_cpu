@@ -5,6 +5,7 @@ extern crate alloc;
 
 pub mod fanout;
 pub mod nor_inputs;
+pub mod latch_lanes;
 
 use alloc::vec::Vec;
 use vstd::prelude::*;

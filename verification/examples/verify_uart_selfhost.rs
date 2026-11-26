@@ -37,7 +37,11 @@ struct Machine {
 
 impl Machine {
     fn new(mut reference: ClockedVm, limit: u64, loader: Loader) -> Result<Self, Box<dyn Error>> {
-        let mut event = EventVm::new(&reference)?;
+        let mut event = if std::env::var_os("NCG2_BENCH_LATCH_LANES").is_some() {
+            EventVm::new_with_latch_lanes(&reference)?
+        } else {
+            EventVm::new(&reference)?
+        };
         if event.reset() != reference.reset() {
             return Err("標準 VM と疎実行で reset の出力が異なる。".into());
         }

@@ -4,6 +4,7 @@ use circuitgame2_core::netlist::{ClockedVm, TickInputError, Wire};
 use ncg2_event_queue::{
     EvaluationQueue,
     fanout::{Pin, ReverseDependencies, StoragePins},
+    latch_lanes::{changed_lanes, consecutive_tail},
     nor_inputs::PackedNorInputs,
 };
 use std::ops::Range;
@@ -20,6 +21,7 @@ struct Storage {
     output: Range<usize>,
     pins: StoragePins,
     ram: Option<Vec<bool>>,
+    consecutive_tail: Option<usize>,
 }
 
 /// Core の展開済み配線で、変化のある素子を再評価する検証用の実行器。
@@ -50,6 +52,19 @@ impl EventVm {
     ///
     /// 外部入力、状態素子の出力区間または RAM の容量が展開済みの配線と整合しない場合や、定数を含む配線の添字を表せない場合に返す。
     pub fn new(vm: &ClockedVm) -> Result<Self, &'static str> {
+        Self::with_latch_lanes(vm, false)
+    }
+
+    /// 連続した配線を持つラッチの変更ビットを8ビットずつ調べる。
+    ///
+    /// # Errors
+    ///
+    /// 配線または容量が [`Self::new`] の構築条件を満たさない場合に返す。
+    pub fn new_with_latch_lanes(vm: &ClockedVm) -> Result<Self, &'static str> {
+        Self::with_latch_lanes(vm, true)
+    }
+
+    fn with_latch_lanes(vm: &ClockedVm, lanes: bool) -> Result<Self, &'static str> {
         let net = vm.netlist();
         let external = vm.external_input_count();
         let augmented = net.input_count;
@@ -95,14 +110,21 @@ impl EventVm {
             } else {
                 (Vec::new(), None)
             };
+            let data: Vec<_> = wiring.data.iter().copied().map(pin).collect();
+            let consecutive_tail = if lanes && ram.is_none() && data.len() >= 9 {
+                consecutive_tail(&data)
+            } else {
+                None
+            };
             storage.push(Storage {
                 output,
                 pins: StoragePins {
                     address,
-                    data: wiring.data.iter().copied().map(pin).collect(),
+                    data,
                     enable: pin(wiring.enable),
                 },
                 ram,
+                consecutive_tail,
             });
         }
         if next != augmented {
@@ -261,6 +283,31 @@ impl EventVm {
                 }
             }
         } else if enabled {
+            if let Some(base) = device.consecutive_tail {
+                let slots = self.nor.read_only();
+                let first = device.output.start;
+                let next = device.pins.data[0].read(slots);
+                if slots[first] != next {
+                    self.changes.push((first, next));
+                }
+                let width = device.output.len() - 1;
+                let (before, before_tail) = slots[first + 1..device.output.end].as_chunks::<8>();
+                let (after, after_tail) = slots[base..base + width].as_chunks::<8>();
+                for (block, (before, after)) in before.iter().zip(after).enumerate() {
+                    let mut mask = changed_lanes(before, after);
+                    while mask != 0 {
+                        let lane = mask.trailing_zeros() as usize;
+                        self.changes.push((first + 1 + 8 * block + lane, after[lane]));
+                        mask &= mask - 1;
+                    }
+                }
+                for (offset, (&before, &value)) in before_tail.iter().zip(after_tail).enumerate() {
+                    if before != value {
+                        self.changes.push((first + 1 + width - after_tail.len() + offset, value));
+                    }
+                }
+                return;
+            }
             for (slot, &pin) in device.output.clone().zip(&device.pins.data) {
                 let value = pin.read(self.nor.read_only());
                 if self.nor.read_only()[slot] != value {
