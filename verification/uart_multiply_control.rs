@@ -606,6 +606,9 @@ pub proof fn cpu_multiply_window_completes(
         forall|t: int| i < t < i + 34197 ==> !(#[trigger] issue(t)),
         forall|t: int| i - 8 <= t < i + 34188 ==> !(#[trigger] finished(t)),
         finished(i + 34188),
+        forall|t: int| i + 34182 < t < i + 35227 ==> !(#[trigger] capture(t)),
+        forall|t: int| i + 34188 < t <= i + 35233 ==> !(#[trigger] finished(t)),
+        forall|t: int| i + 34191 <= t <= i + 35234 ==> !(#[trigger] running(t)),
 {
     multiply_window_rejects_early_issue(
         start, capture, done, finished, running, mark, issue, commit, simple, i, i + 34196,
@@ -615,6 +618,81 @@ pub proof fn cpu_multiply_window_completes(
         assert(!issue(t - 1027));
     }
     isolated_multiply_reaches_round(start, capture, done, finished, running, mark, s, 64);
+    let end = i + 34182;
+    assert forall|t: int| s < t < end + 1042 implies !(#[trigger] start(t)) by {
+        assert(!issue(t - 1027));
+    }
+    quiet_multiply_after_retirement(start, capture, done, finished, running, s, end);
+}
+
+/// 乗算の停止から、次の開始要求が届くまでの静穏区間を得る。
+proof fn quiet_multiply_after_retirement(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    s: int,
+    last: int,
+)
+    requires
+        multiply_control(start, capture, done, finished),
+        multiply_running_timing(start, finished, running),
+        2 <= s && s + 3 <= last,
+        forall|t: int| s + 3 - 518 <= t < s + 3 ==> !(#[trigger] capture(t)),
+        forall|t: int| s < t < last + 1042 ==> !(#[trigger] start(t)),
+        capture(last), done(last + 1), finished(last + 6),
+    ensures
+        forall|t: int| last < t < last + 1045 ==> !(#[trigger] capture(t)),
+        forall|t: int| last + 6 < t <= last + 1051 ==> !(#[trigger] finished(t)),
+        forall|t: int| last + 9 <= t <= last + 1052 ==> !(#[trigger] running(t)),
+{
+    isolated_multiply_stops_after_completion(start, capture, done, finished, s + 3, last, last + 1044);
+    assert forall|t: int| last + 9 <= t <= last + 1052 implies !(#[trigger] running(t)) by {
+        multiply_running_clears(start, finished, running, last + 6, t);
+    }
+}
+
+/// 完了通知がラッチに届いた後、新しい開始要求が届くまでは実行中にならない。
+proof fn multiply_running_clears(
+    start: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    end: int,
+    until: int,
+)
+    requires
+        multiply_running_timing(start, finished, running),
+        11 <= end + 3 <= until,
+        finished(end),
+        forall|t: int| end + 3 <= t <= until ==> !(#[trigger] start(t - 11)),
+    ensures !running(until),
+    decreases until - end - 3,
+{
+    if end + 3 < until {
+        multiply_running_clears(start, finished, running, end, until - 1);
+    }
+    assert(!start(until - 11));
+}
+
+/// 命令が有効なら、内部の乗算完了通知は commit と次の issue を起こす。
+pub proof fn valid_multiply_retirement_opens_next_window(
+    valid: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+    notification: int,
+)
+    requires
+        0 <= notification,
+        finished(notification),
+        valid(notification + 3),
+        forall|t: int| t >= 6 && #[trigger] finished(t - 6) && valid(t - 3) ==> commit(t),
+        forall|t: int| t >= 4 && #[trigger] commit(t - 3) ==> issue(t),
+    ensures commit(notification + 6), issue(notification + 9),
+{
+    assert(finished((notification + 6) - 6));
+    assert(commit((notification + 9) - 3));
 }
 
 /// 一つの乗算の実行中に別の退役通知がなければ、次の開始までに反復は止まる。
