@@ -101,7 +101,8 @@ set -e
 host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
 mkdir -p target/verification
 for circuit in add shift-left xor compare-unsigned less-than-unsigned \
-  boot-ram-address execute-boot execute-control execute-load execute-logic mul-round; do
+  boot-ram-address execute-boot execute-control execute-load execute-logic \
+  firmware-dispatch mul-round; do
   model="target/verification/$circuit.smt2"
   cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
     --target "$host" --target-dir target/verification -- "$circuit" > "$model"

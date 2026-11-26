@@ -1,0 +1,48 @@
+(namespace rv64
+  (export firmware-dispatch)
+
+  ;; 命令の結果と更新要求を一組にする。RAM から得た値と完了済みの積を受け取る。
+  ;; 無効なフェッチ、未対応命令、禁止されたアクセスでは更新要求をすべて0にする。
+  ;; memory-address は命令の LD・SD がデータポートを使わない場合に probe-address を返す。
+  (func firmware-dispatch
+    (in (instruction (bits 32)) (pc-offset (bits 64)) (first-value (bits 64))
+        (second-value (bits 64)) (loaded-data (bits 64)) (product (bits 64))
+        fetch-valid (probe-address (bits 64)))
+    (out valid multiply (next-offset (bits 64)) (destination (bits 5))
+         (register-data (bits 64)) write-register (memory-address (bits 64))
+         (store-data (bits 64)) write-memory)
+    (def (basic-valid basic-next destination basic-data basic-write store-address store-data store)
+      (execute-boot instruction pc-offset first-value second-value))
+    (def (control control-valid control-next control-rd control-data control-write)
+      (execute-control instruction pc-offset first-value second-value))
+    (def (load load-valid load-address load-rd) (execute-load instruction first-value))
+    (def (logic multiply logic-data) (execute-logic instruction first-value second-value))
+
+    (def (rom bss stack rom-word bss-word stack-word) (firmware-data-map store-address))
+    (def writable (execute-or bss stack))
+    (def not-store (nor store store))
+    (def store-valid (execute-or not-store writable))
+    (def basic-accepted (execute-and basic-valid store-valid))
+    (def logic-or-multiply (execute-or logic multiply))
+    (def sequential-operation (execute-or load-valid logic-or-multiply))
+    (def control-or-basic (execute-or control-valid basic-accepted))
+    (def executable (execute-or control-or-basic sequential-operation))
+    (def valid (execute-and fetch-valid executable))
+
+    (def next-basic-or-control (::rv64::arithmetic::select control basic-next control-next))
+    (def four #x0000000000000004)
+    (def sequential (::rv64::arithmetic::add pc-offset four))
+    (def requested-offset
+      (::rv64::arithmetic::select sequential-operation next-basic-or-control sequential))
+    (def next-offset (::rv64::arithmetic::select valid pc-offset requested-offset))
+    (def data-basic-or-control (::rv64::arithmetic::select control basic-data control-data))
+    (def data-or-logic (::rv64::arithmetic::select logic data-basic-or-control logic-data))
+    (def data-or-load (::rv64::arithmetic::select load data-or-logic loaded-data))
+    (def register-data (::rv64::arithmetic::select multiply data-or-load product))
+    (def basic-or-control-write (execute-or basic-write control-write))
+    (def register-request (execute-or basic-or-control-write sequential-operation))
+    (def write-register (execute-and valid register-request))
+
+    (def observation-or-store (::rv64::arithmetic::select store probe-address store-address))
+    (def memory-address (::rv64::arithmetic::select load observation-or-store load-address))
+    (def write-memory (execute-and valid store))))

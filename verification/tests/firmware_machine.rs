@@ -22,6 +22,7 @@ fn runs_the_rust_elf_to_its_halt_loop() {
         "execute-load",
         "execute-logic",
         "multiply",
+        "firmware-dispatch",
         "firmware-machine",
     ];
     let sources: Vec<_> = sources

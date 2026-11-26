@@ -4,6 +4,42 @@ use circuitgame2_core::netlist::{NorNetlist, Wire};
 
 use super::{name, vector};
 
+/// 命令、フェッチの成否、オペランド、メモリと乗算の結果を独立した入力として比較する。
+pub(super) fn emit_dispatch(outputs: &[Wire]) {
+    for (port, start, stop) in [
+        ("instruction", 0, 32),
+        ("pc", 32, 96),
+        ("rs1", 96, 160),
+        ("rs2", 160, 224),
+        ("loaded-data", 224, 288),
+        ("product", 288, 352),
+        ("probe", 353, 417),
+    ] {
+        let bits = vector((start..stop).map(|i| format!("i{i}")));
+        println!("(define-fun {port} () (_ BitVec {}) {bits})", stop - start);
+    }
+    println!("(define-fun fetch-valid () Bool i352)");
+    for (port, bit) in [
+        ("valid", 0),
+        ("multiply", 1),
+        ("register-write", 135),
+        ("memory-write", 264),
+    ] {
+        println!("(define-fun {port} () Bool {})", name(outputs[bit]));
+    }
+    for (port, start, stop) in [
+        ("next-pc", 2, 66),
+        ("destination", 66, 71),
+        ("register-data", 71, 135),
+        ("memory-address", 136, 200),
+        ("store-data", 200, 264),
+    ] {
+        let bits = vector(outputs[start..stop].iter().copied().map(name));
+        println!("(define-fun {port} () (_ BitVec {}) {bits})", stop - start);
+    }
+    print!("{}", include_str!("firmware_dispatch.smt2"));
+}
+
 /// バンク判定の各出力へ入力が到達する経路を、展開済みの NOR 列から調べる。
 ///
 /// 定数を除き、最短と最長がともに12段なら、フレームが途中で混ざらない。

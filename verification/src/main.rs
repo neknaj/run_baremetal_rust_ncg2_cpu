@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         selected @ ("add" | "shift-left" | "boot-ram-address" | "execute-boot" | "firmware-rom"
         | "firmware-fetch" | "firmware-data-map" | "execute-control" | "xor"
         | "compare-unsigned" | "less-than-unsigned" | "execute-load" | "execute-logic"
-        | "mul-round"),
+        | "mul-round" | "firmware-dispatch"),
     ) = args.get(1).map(String::as_str)
     else {
         return Err("検証対象の NCG2 関数名を指定する。対象は README と各設計文書を参照。".into());
@@ -77,6 +77,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "execute-logic.ncg2",
         ],
         "mul-round" => &["decode.ncg2", "arithmetic.ncg2", "multiply.ncg2"],
+        "firmware-dispatch" => &[
+            "decode.ncg2",
+            "arithmetic.ncg2",
+            "boot-rom.ncg2",
+            "fetch-boot.ncg2",
+            "execute-boot.ncg2",
+            "execute-control.ncg2",
+            "firmware-rom.ncg2",
+            "firmware-memory.ncg2",
+            "execute-load.ncg2",
+            "execute-logic.ncg2",
+            "firmware-dispatch.ncg2",
+        ],
         "execute-load" => &[
             "decode.ncg2",
             "arithmetic.ncg2",
@@ -148,6 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-load" => (96, 71),
         "execute-logic" => (160, 66),
         "mul-round" => (386, 257),
+        "firmware-dispatch" => (417, 265),
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
         "firmware-data-map" => (64, 28),
@@ -161,6 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-load" => Some(468),
         "execute-logic" => Some(31),
         "mul-round" => Some(457),
+        "firmware-dispatch" => Some(505),
         _ => None,
     };
     if let Some(limit) = depth_limit {
@@ -209,6 +224,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firmware::emit_data_map(outputs);
     } else if selected == "mul-round" {
         multiply::emit(outputs);
+    } else if selected == "firmware-dispatch" {
+        firmware::emit_dispatch(outputs);
     } else if matches!(selected, "execute-load" | "execute-logic") {
         let instruction = vector((0..32).map(|i| format!("i{i}")));
         let rs1 = vector((32..96).map(|i| format!("i{i}")));
