@@ -22,6 +22,18 @@
     (def rising (nor no-done older-done))
     (def finished (accept-pulse rising running)))
 
+  ;; 乗算を待たない命令または乗算器から完了通知を受け、更新要求を出す。
+  ;; 完了から更新要求までの tick と、起動時の抑止条件は doc/retire-control.md に従う。
+  (module firmware-retire
+    (in simple multiply-finished valid write-register write-memory)
+    (out commit register-enable memory-write)
+    (def raw-retire (execute-or simple multiply-finished))
+    (def armed (delay-2 1))
+    (def retire (phase-bit raw-retire armed))
+    (def commit (accept-pulse retire valid))
+    (def register-enable (accept-pulse retire write-register))
+    (def memory-write (accept-pulse retire write-memory)))
+
   ;; 同じアドレス空間から命令とデータを読む。入力は実行を制御せず、RAM の観測先だけを指定する。
   ;; commit のフレームの PC は完了した命令を指す。次 tick に PC が更新される。
   ;; load または store の間は、その命令がデータポートを使う。
@@ -49,9 +61,5 @@
     (def (product mul-finished) (firmware-multiply mul-start first-value second-value high-product))
     (def not-multiply (nor multiply multiply))
     (def simple (accept-pulse ready not-multiply))
-    (def raw-retire (execute-or simple mul-finished))
-    (def armed (delay-2 1))
-    (def retire (phase-bit raw-retire armed))
-    (def commit (accept-pulse retire valid))
-    (def register-enable (accept-pulse retire write-register))
-    (def memory-write (accept-pulse retire write-memory))))
+    (def (commit register-enable memory-write)
+      (firmware-retire simple mul-finished valid write-register write-memory))))

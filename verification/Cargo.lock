@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "circuitgame2-core"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core.git?rev=92a09047cbd405e83e7af21ab486b47c1a87dfde#92a09047cbd405e83e7af21ab486b47c1a87dfde"
+source = "git+https://github.com/neknaj/circuitgame2-core.git?rev=7ce39f6465390e64c023a63f1f89b9d0fba0c426#7ce39f6465390e64c023a63f1f89b9d0fba0c426"
 dependencies = [
  "circuitgame2-device-timing",
  "circuitgame2-packed-nor",
@@ -16,7 +16,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-device-timing"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core.git?rev=92a09047cbd405e83e7af21ab486b47c1a87dfde#92a09047cbd405e83e7af21ab486b47c1a87dfde"
+source = "git+https://github.com/neknaj/circuitgame2-core.git?rev=7ce39f6465390e64c023a63f1f89b9d0fba0c426#7ce39f6465390e64c023a63f1f89b9d0fba0c426"
 dependencies = [
  "verus_builtin_macros",
  "vstd",
@@ -25,7 +25,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-packed-nor"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core.git?rev=92a09047cbd405e83e7af21ab486b47c1a87dfde#92a09047cbd405e83e7af21ab486b47c1a87dfde"
+source = "git+https://github.com/neknaj/circuitgame2-core.git?rev=7ce39f6465390e64c023a63f1f89b9d0fba0c426#7ce39f6465390e64c023a63f1f89b9d0fba0c426"
 dependencies = [
  "verus_builtin_macros",
  "vstd",
@@ -34,7 +34,7 @@ dependencies = [
 [[package]]
 name = "circuitgame2-syntax"
 version = "0.1.0"
-source = "git+https://github.com/neknaj/circuitgame2-core.git?rev=92a09047cbd405e83e7af21ab486b47c1a87dfde#92a09047cbd405e83e7af21ab486b47c1a87dfde"
+source = "git+https://github.com/neknaj/circuitgame2-core.git?rev=7ce39f6465390e64c023a63f1f89b9d0fba0c426#7ce39f6465390e64c023a63f1f89b9d0fba0c426"
 dependencies = [
  "vstd",
 ]
