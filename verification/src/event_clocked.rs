@@ -6,6 +6,7 @@ use ncg2_event_queue::{
     fanout::{Pin, ReverseDependencies, StoragePins},
     latch_lanes::{changed_lanes, evaluate_shift_pins, latch_input_layout},
     nor_inputs::PackedNorInputs,
+    ram_address::{ram_capacity, ram_word_start},
     wire_updates::{publish_wire, publish_wire_updates},
 };
 use std::ops::Range;
@@ -107,10 +108,7 @@ impl EventVm {
             next = output.end;
             let (address, ram) = if let Some(address) = &wiring.address {
                 let bits = vm.ram_memory(index).ok_or("RAM に記憶領域がない。")?.len();
-                let expected = u32::try_from(address.len())
-                    .ok()
-                    .and_then(|width| 1usize.checked_shl(width))
-                    .and_then(|words| words.checked_mul(output.len()));
+                let expected = ram_capacity(address.len(), output.len());
                 if expected != Some(bits) {
                     return Err("RAM の容量がアドレス幅と語幅に合わない。");
                 }
@@ -270,11 +268,7 @@ impl EventVm {
         let device = &mut self.storage[index];
         let enabled = device.pins.enable.read(self.nor.read_only());
         if let Some(ram) = &device.ram {
-            let mut word = 0;
-            for (bit, &pin) in device.pins.address.iter().enumerate() {
-                word |= usize::from(pin.read(self.nor.read_only())) << bit;
-            }
-            let start = word * device.output.len();
+            let start = ram_word_start(&device.pins.address, self.nor.read_only(), device.output.len());
             let read = &ram[start..start + device.output.len()];
             for (slot, &value) in device.output.clone().zip(read) {
                 if self.nor.read_only()[slot] != value {
