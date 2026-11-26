@@ -4,7 +4,10 @@ use circuitgame2_core::netlist::{ClockedVm, TickInputError, Wire};
 use ncg2_event_queue::{
     EvaluationQueue,
     fanout::{Pin, ReverseDependencies, StoragePins},
+    latch_lanes::{changed_lanes, evaluate_shift_pins, latch_input_layout},
     nor_inputs::PackedNorInputs,
+    ram::{commit_ram_write, ram_capacity, ram_word_start, sample_ram_write},
+    wire_updates::{publish_wire, publish_wire_updates},
 };
 use std::ops::Range;
 
@@ -20,6 +23,8 @@ struct Storage {
     output: Range<usize>,
     pins: StoragePins,
     ram: Option<Vec<bool>>,
+    consecutive_tail: Option<usize>,
+    shift_word: Option<u64>,
 }
 
 /// Core の展開済み配線で、変化のある素子を再評価する検証用の実行器。
@@ -50,6 +55,28 @@ impl EventVm {
     ///
     /// 外部入力、状態素子の出力区間または RAM の容量が展開済みの配線と整合しない場合や、定数を含む配線の添字を表せない場合に返す。
     pub fn new(vm: &ClockedVm) -> Result<Self, &'static str> {
+        Self::with_latch_lanes(vm, false, false)
+    }
+
+    /// 連続した配線を持つラッチの変更ビットを8ビットずつ調べる。
+    ///
+    /// # Errors
+    ///
+    /// 配線または容量が [`Self::new`] の構築条件を満たさない場合に返す。
+    pub fn new_with_latch_lanes(vm: &ClockedVm) -> Result<Self, &'static str> {
+        Self::with_latch_lanes(vm, true, false)
+    }
+
+    /// 連続した配線の比較に加え、1ビットずつ進むラッチをワードで評価する。
+    ///
+    /// # Errors
+    ///
+    /// 配線または容量が Self::new の構築条件を満たさない場合に返す。
+    pub fn new_with_shift_latches(vm: &ClockedVm) -> Result<Self, &'static str> {
+        Self::with_latch_lanes(vm, true, true)
+    }
+
+    fn with_latch_lanes(vm: &ClockedVm, lanes: bool, shift: bool) -> Result<Self, &'static str> {
         let net = vm.netlist();
         let external = vm.external_input_count();
         let augmented = net.input_count;
@@ -81,10 +108,7 @@ impl EventVm {
             next = output.end;
             let (address, ram) = if let Some(address) = &wiring.address {
                 let bits = vm.ram_memory(index).ok_or("RAM に記憶領域がない。")?.len();
-                let expected = u32::try_from(address.len())
-                    .ok()
-                    .and_then(|width| 1usize.checked_shl(width))
-                    .and_then(|words| words.checked_mul(output.len()));
+                let expected = ram_capacity(address.len(), output.len());
                 if expected != Some(bits) {
                     return Err("RAM の容量がアドレス幅と語幅に合わない。");
                 }
@@ -95,14 +119,23 @@ impl EventVm {
             } else {
                 (Vec::new(), None)
             };
+            let data: Vec<_> = wiring.data.iter().copied().map(pin).collect();
+            let (consecutive_tail, shift_layout) = if ram.is_none() {
+                latch_input_layout(&data, output.start, lanes, shift)
+            } else {
+                (None, false)
+            };
+            let shift_word = shift_layout.then_some(0);
             storage.push(Storage {
                 output,
                 pins: StoragePins {
                     address,
-                    data: wiring.data.iter().copied().map(pin).collect(),
+                    data,
                     enable: pin(wiring.enable),
                 },
                 ram,
+                consecutive_tail,
+                shift_word,
             });
         }
         if next != augmented {
@@ -138,6 +171,9 @@ impl EventVm {
     pub fn reset(&mut self) -> &[bool] {
         self.nor.reset();
         for device in &mut self.storage {
+            if let Some(word) = &mut device.shift_word {
+                *word = 0;
+            }
             if let Some(ram) = &mut device.ram {
                 ram.fill(false);
             }
@@ -186,7 +222,14 @@ impl EventVm {
                 self.publish(slot, value);
             }
         }
+        Ok(self.step_reusing_inputs())
+    }
 
+    /// 外部入力の確定値を保ったまま回路だけを1 tick 進める。
+    ///
+    /// 直前の tick に適用した入力を使う。構築または reset の直後は入力がすべて0である。
+    /// 同じ入力を渡した [`Self::step`] と同じ評価・確定処理で、入力の照合を省く。
+    pub fn step_reusing_inputs(&mut self) -> &[bool] {
         self.evaluated = self.queue.pending_count();
         while let Some(node) = self.queue.pop() {
             if node < self.nor.gate_count() {
@@ -201,48 +244,31 @@ impl EventVm {
         }
 
         // ここから登録出力を確定する。依存先は次の tick で再評価する。
-        for i in 0..self.changes.len() {
-            let (slot, value) = self.changes[i];
-            self.publish(slot, value);
-        }
+        publish_wire_updates(&mut self.nor, &self.users, &mut self.queue, &mut self.output, &self.changes);
         self.changes.clear();
         for &(index, start) in &self.ram_writes {
             let device = &mut self.storage[index];
             let ram = device.ram.as_mut().expect("書き込み候補は RAM だけ");
             let word = &self.write_data[device.output.clone()];
-            ram[start..start + word.len()].copy_from_slice(word);
+            commit_ram_write(ram, start, word);
 
             // 同じ入力のままでも、次の read-first 読み出しは新しい語を読む。
             let node = self.nor.gate_count() + index;
             self.queue.insert(node);
         }
         self.ram_writes.clear();
-        Ok(&self.output)
+        &self.output
     }
 
     fn publish(&mut self, slot: usize, value: bool) {
-        if !self.nor.set(slot, value) {
-            return;
-        }
-        let (nodes, outputs) = self
-            .users
-            .readers(slot)
-            .expect("値の列と逆引き表は同じ配線番号を使う");
-        self.queue.insert_all(nodes);
-        for &target in outputs {
-            self.output[target] = value;
-        }
+        publish_wire(&mut self.nor, &self.users, &mut self.queue, &mut self.output, slot, value);
     }
 
     fn evaluate_storage(&mut self, index: usize) {
-        let device = &self.storage[index];
+        let device = &mut self.storage[index];
         let enabled = device.pins.enable.read(self.nor.read_only());
         if let Some(ram) = &device.ram {
-            let mut word = 0;
-            for (bit, &pin) in device.pins.address.iter().enumerate() {
-                word |= usize::from(pin.read(self.nor.read_only())) << bit;
-            }
-            let start = word * device.output.len();
+            let start = ram_word_start(&device.pins.address, self.nor.read_only(), device.output.len());
             let read = &ram[start..start + device.output.len()];
             for (slot, &value) in device.output.clone().zip(read) {
                 if self.nor.read_only()[slot] != value {
@@ -250,17 +276,45 @@ impl EventVm {
                 }
             }
             if enabled {
-                let mut changed = false;
-                for ((slot, &pin), &old) in device.output.clone().zip(&device.pins.data).zip(read) {
-                    let value = pin.read(self.nor.read_only());
-                    changed |= value != old;
-                    self.write_data[slot] = value;
-                }
+                let word = &mut self.write_data[device.output.clone()];
+                let changed = sample_ram_write(&device.pins.data, self.nor.read_only(), read, word);
                 if changed {
                     self.ram_writes.push((index, start));
                 }
             }
         } else if enabled {
+            if let Some(word) = &mut device.shift_word {
+                // 他の素子が読む配線は、すべての評価が終わるまで書き換えない。
+                *word = evaluate_shift_pins(
+                    &mut self.changes, self.nor.read_only(), &device.pins.data, device.output.start, *word,
+                );
+                return;
+            }
+            if let Some(base) = device.consecutive_tail {
+                let slots = self.nor.read_only();
+                let first = device.output.start;
+                let next = device.pins.data[0].read(slots);
+                if slots[first] != next {
+                    self.changes.push((first, next));
+                }
+                let width = device.output.len() - 1;
+                let (before, before_tail) = slots[first + 1..device.output.end].as_chunks::<8>();
+                let (after, after_tail) = slots[base..base + width].as_chunks::<8>();
+                for (block, (before, after)) in before.iter().zip(after).enumerate() {
+                    let mut mask = changed_lanes(before, after);
+                    while mask != 0 {
+                        let lane = mask.trailing_zeros() as usize;
+                        self.changes.push((first + 1 + 8 * block + lane, after[lane]));
+                        mask &= mask - 1;
+                    }
+                }
+                for (offset, (&before, &value)) in before_tail.iter().zip(after_tail).enumerate() {
+                    if before != value {
+                        self.changes.push((first + 1 + width - after_tail.len() + offset, value));
+                    }
+                }
+                return;
+            }
             for (slot, &pin) in device.output.clone().zip(&device.pins.data) {
                 let value = pin.read(self.nor.read_only());
                 if self.nor.read_only()[slot] != value {
