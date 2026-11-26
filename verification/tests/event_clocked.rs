@@ -157,3 +157,33 @@ fn mixes_ram_feedback_latch_and_direct_output_in_the_same_old_state() {
         }
     }
 }
+
+#[test]
+fn shortened_delays_preserve_pulses_and_reset_pending_updates() {
+    use Wire::{Constant, Gate, Input};
+
+    let network = ClockedNor::check(NorNetlist {
+        input_count: 7,
+        gates: vec![NorGate { left: Input(3), right: Input(3) }],
+        outputs: vec![Input(2), Input(4), Input(6), Gate(0)],
+    })
+    .unwrap();
+    let signals = [Input(0), Input(1), Input(2), Input(3), Constant(true), Input(5)];
+    let stages = signals
+        .into_iter()
+        .map(|input| ClockedStorageInputs {
+            address: None,
+            data: vec![input],
+            enable: Constant(true),
+        })
+        .collect();
+    let mut core = ClockedVm::new(network, 1, stages, 6).unwrap();
+    let mut event = EventVm::new_with_latch_delays(&core).unwrap();
+    for inputs in [[true, false, true, true, false], [false, true, true, false, false]] {
+        assert_eq!(event.reset(), core.reset());
+        for (index, input) in inputs.into_iter().enumerate() {
+            assert_eq!(event.step(&[]), Err(TickInputError::InputCount));
+            assert_eq!(event.step(&[input]).unwrap(), core.step(&[input]).unwrap(), "tick {}", index + 1);
+        }
+    }
+}

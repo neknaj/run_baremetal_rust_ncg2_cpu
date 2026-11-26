@@ -28,8 +28,12 @@ struct Machine {
 }
 
 impl Machine {
-    fn new(mut reference: ClockedVm, limit: u64) -> Result<Self, Box<dyn Error>> {
-        let mut event = EventVm::new(&reference)?;
+    fn new(mut reference: ClockedVm, limit: u64, latch_delays: bool) -> Result<Self, Box<dyn Error>> {
+        let mut event = if latch_delays {
+            EventVm::new_with_latch_delays(&reference)?
+        } else {
+            EventVm::new(&reference)?
+        };
         if event.reset() != reference.reset() {
             return Err("標準 VM と疎実行で reset の出力が異なる。".into());
         }
@@ -477,6 +481,7 @@ fn measure_transfer(
     image: &Path,
     count: usize,
     shared_input: bool,
+    latch_delays: bool,
 ) -> Result<(), Box<dyn Error>> {
     let image = fs::read(image)?;
     let words = image_words(&image)?;
@@ -484,7 +489,7 @@ fn measure_transfer(
         return Err("計測するペイロード語数が転送データの範囲外。".into());
     }
     let setup = Instant::now();
-    let mut machine = Machine::new(uart::machine(project)?, u64::MAX)?;
+    let mut machine = Machine::new(uart::machine(project)?, u64::MAX, latch_delays)?;
     let setup_elapsed = setup.elapsed();
     let chains = machine.event.linear_latch_chains();
     let stages: usize = chains.iter().map(Vec::len).sum();
@@ -586,7 +591,8 @@ fn verify_execution(
 fn main() -> Result<(), Box<dyn Error>> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if let [project, image, flag, count] = args.as_slice()
-        && (flag == "--measure-transfer" || flag == "--measure-transfer-shared")
+        && (flag == "--measure-transfer" || flag == "--measure-transfer-shared"
+            || flag == "--measure-transfer-delays")
     {
         let count = count
             .to_str()
@@ -597,6 +603,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Path::new(image),
             count,
             flag == "--measure-transfer-shared",
+            flag == "--measure-transfer-delays",
         );
     }
     let (project, image, log, expected, limit) = match args.as_slice() {
@@ -623,7 +630,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let image = fs::read(image)?;
     let words = image_words(&image)?;
     let reference = reference_pcs(Path::new(log))?;
-    let mut machine = Machine::new(uart::machine(Path::new(project))?, limit)?;
+    let mut machine = Machine::new(uart::machine(Path::new(project))?, limit, false)?;
     flash(&mut machine, words, None)?;
     verify_execution(&mut machine, &reference, expected)
 }

@@ -19,7 +19,9 @@ fn boots_two_words_sent_as_uart_frames_and_observes_the_application_store() {
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("../uart-boot.toml");
     let mut reference = uart::machine(&config).unwrap();
     let mut event = EventVm::new(&reference).unwrap();
+    let mut delayed = EventVm::new_with_latch_delays(&reference).unwrap();
     assert_eq!(event.reset(), reference.reset());
+    assert_eq!(delayed.reset(), event.output());
     let mut input = [false; 65];
     for bit in 0..64 {
         input[bit + 1] = (PROBE >> bit) & 1 != 0;
@@ -33,6 +35,7 @@ fn boots_two_words_sent_as_uart_frames_and_observes_the_application_store() {
         input[0] = rx;
         let output = event.step(&input).unwrap();
         assert_eq!(output, reference.step(&input).unwrap(), "tick {ticks}");
+        assert_eq!(delayed.step(&input).unwrap(), output, "遅延鎖、tick {ticks}");
         let address = word(&output[64..128]);
         if address == last_address {
             address_ticks += 1;
@@ -84,6 +87,9 @@ fn boots_two_words_sent_as_uart_frames_and_observes_the_application_store() {
         .unwrap();
     let standard_ram = reference.ram_memory(bank).unwrap();
     assert_eq!(event.ram_memory(bank).unwrap(), standard_ram);
+    for index in 0..reference.storage_count() {
+        assert_eq!(delayed.ram_memory(index), reference.ram_memory(index), "RAM {index}");
+    }
     assert_eq!(
         writes,
         [0x200010, 0x10000, 0x200010, 0x10008, 0x200010, PROBE]

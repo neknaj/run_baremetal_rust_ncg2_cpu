@@ -3,10 +3,11 @@
 use circuitgame2_core::netlist::{ClockedVm, TickInputError, Wire};
 use ncg2_event_queue::{
     EvaluationQueue,
+    delay_schedule::{DelayInputEdge, schedule_delay_edge},
     fanout::{Pin, ReverseDependencies, StoragePins},
     nor_inputs::PackedNorInputs,
 };
-use std::ops::Range;
+use std::{cmp::Reverse, collections::BinaryHeap, ops::Range};
 
 fn pin_for_wire(wire: Wire, augmented: usize) -> Pin {
     match wire {
@@ -31,6 +32,80 @@ impl Storage {
     }
 }
 
+/// 先頭段が読み取った値を、末尾の配線へ届ける。
+#[derive(Clone, Copy)]
+struct DelayRoute {
+    stages: usize,
+    output: usize,
+}
+
+struct LatchDelays {
+    tick: u64,
+    eliminated: Vec<bool>,
+    source_rows: Vec<usize>,
+    routes: Vec<Vec<DelayRoute>>,
+    initial: Vec<DelayRoute>,
+    pending: BinaryHeap<Reverse<(u64, usize, bool)>>,
+}
+
+impl LatchDelays {
+    // 予定を相対時刻に戻す境界。鎖の長さもここまでに制限する。
+    const REBASE_TICK: u64 = u64::MAX / 2;
+
+    fn advance(&mut self) {
+        if self.tick == Self::REBASE_TICK {
+            // 確定済みの予定は除去されているため、残りはすべて現在より先にある。
+            let mut pending = std::mem::take(&mut self.pending).into_vec();
+            for Reverse((tick, _, _)) in &mut pending {
+                *tick -= self.tick;
+            }
+            self.pending = BinaryHeap::from(pending);
+            self.tick = 0;
+        }
+        self.tick += 1;
+    }
+
+    fn reset(&mut self) {
+        self.tick = 0;
+        self.pending.clear();
+        for &route in &self.initial {
+            Self::schedule(&mut self.pending, route, DelayInputEdge::External { tick: 1, value: true });
+        }
+    }
+
+    fn notify(&mut self, slot: usize, value: bool, external: bool) {
+        let edge = if external {
+            DelayInputEdge::External { tick: self.tick, value }
+        } else {
+            DelayInputEdge::Committed { tick: self.tick, value }
+        };
+        for &route in &self.routes[self.source_rows[slot]] {
+            Self::schedule(&mut self.pending, route, edge);
+        }
+    }
+
+    fn schedule(
+        pending: &mut BinaryHeap<Reverse<(u64, usize, bool)>>,
+        route: DelayRoute,
+        edge: DelayInputEdge,
+    ) {
+        // 各鎖は2段以上で、現在時刻と段数の和は u64 の範囲に収まる。
+        let event = schedule_delay_edge(route.stages, edge, u64::MAX)
+            .expect("遅延鎖の到着時刻は現在の時刻区間に収まる");
+        pending.push(Reverse((event.output_tick, route.output, event.value)));
+    }
+
+    fn due(&mut self, changes: &mut Vec<(usize, bool)>) {
+        while let Some(&Reverse((tick, slot, value))) = self.pending.peek() {
+            if tick != self.tick {
+                break;
+            }
+            self.pending.pop();
+            changes.push((slot, value));
+        }
+    }
+}
+
 /// Core の展開済み配線で、変化のある素子を再評価する検証用の実行器。
 ///
 /// [`ClockedVm`] と同じ順に外部入力と公開出力のビットを並べる。
@@ -48,6 +123,7 @@ pub struct EventVm {
     reset_output: Vec<bool>,
     output: Vec<bool>,
     evaluated: usize,
+    delays: Option<LatchDelays>,
 }
 
 impl EventVm {
@@ -140,10 +216,61 @@ impl EventVm {
             reset_output,
             output,
             evaluated: 0,
+            delays: None,
         })
     }
 
-    /// すべての内部状態と外部入力を0にし、最初の tick に全素子を評価する。
+    /// 内部段を観測できないラッチ鎖を、末尾の到着時刻で実行する。
+    ///
+    /// 初期値は [`Self::new`] と同じ。評価通知と評価数には省いたラッチを含まない。
+    ///
+    /// # Errors
+    ///
+    /// [`Self::new`] の構築条件を満たさない場合、または鎖の段数が実行器の時刻区間を超える場合に返す。
+    pub fn new_with_latch_delays(vm: &ClockedVm) -> Result<Self, &'static str> {
+        let mut event = Self::new(vm)?;
+        let chains = event.linear_latch_chains();
+        if chains.is_empty() {
+            return Ok(event);
+        }
+
+        let mut delays = LatchDelays {
+            tick: 0,
+            eliminated: vec![false; event.storage.len()],
+            source_rows: vec![0; event.nor.read_only().len()],
+            routes: vec![Vec::new()],
+            initial: Vec::new(),
+            pending: BinaryHeap::with_capacity(event.storage.len()),
+        };
+        for chain in chains {
+            if chain.len() as u64 > LatchDelays::REBASE_TICK {
+                return Err("遅延鎖の段数が時刻区間を超える。");
+            }
+            let first = chain[0];
+            let last = chain[chain.len() - 1];
+            let route = DelayRoute { stages: chain.len(), output: event.storage[last].output.start };
+            for index in chain {
+                delays.eliminated[index] = true;
+            }
+            match event.storage[first].pins.data[0] {
+                Pin::Slot(slot) => {
+                    let row = &mut delays.source_rows[slot];
+                    if *row == 0 {
+                        *row = delays.routes.len();
+                        delays.routes.push(Vec::new());
+                    }
+                    delays.routes[*row].push(route);
+                }
+                Pin::Constant(true) => delays.initial.push(route),
+                Pin::Constant(false) => {}
+            }
+        }
+        delays.reset();
+        event.delays = Some(delays);
+        Ok(event)
+    }
+
+    /// すべての内部状態と外部入力を0にし、初回の評価と遅延鎖の初期予定を用意する。
     pub fn reset(&mut self) -> &[bool] {
         self.nor.reset();
         for device in &mut self.storage {
@@ -152,6 +279,9 @@ impl EventVm {
             }
         }
         self.queue.reset_all();
+        if let Some(delays) = &mut self.delays {
+            delays.reset();
+        }
         self.output.copy_from_slice(&self.reset_output);
         self.evaluated = 0;
         &self.output
@@ -247,22 +377,34 @@ impl EventVm {
         if input.len() != self.external {
             return Err(TickInputError::InputCount);
         }
+        if let Some(delays) = &mut self.delays {
+            delays.advance();
+        }
         for (slot, &value) in input.iter().enumerate() {
             self.publish(slot, value);
         }
 
         self.evaluated = self.queue.pending_count();
         while let Some(node) = self.queue.pop() {
-            evaluate(node);
             if node < self.nor.gate_count() {
+                evaluate(node);
                 let value = self.nor.next(node);
                 let slot = self.augmented + node;
                 if self.nor.read_only()[slot] != value {
                     self.changes.push((slot, value));
                 }
             } else {
-                self.evaluate_storage(node - self.nor.gate_count());
+                let index = node - self.nor.gate_count();
+                if self.delays.as_ref().is_some_and(|delays| delays.eliminated[index]) {
+                    self.evaluated -= 1;
+                    continue;
+                }
+                evaluate(node);
+                self.evaluate_storage(index);
             }
+        }
+        if let Some(delays) = &mut self.delays {
+            delays.due(&mut self.changes);
         }
 
         // ここから登録出力を確定する。依存先は次の tick で再評価する。
@@ -294,6 +436,9 @@ impl EventVm {
             .readers(slot)
             .expect("値の列と逆引き表は同じ配線番号を使う");
         self.queue.insert_all(nodes);
+        if let Some(delays) = &mut self.delays {
+            delays.notify(slot, value, slot < self.external);
+        }
         for &target in outputs {
             self.output[target] = value;
         }
@@ -333,5 +478,33 @@ impl EventVm {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod latch_delay_tests {
+    use super::*;
+
+    #[test]
+    fn rebasing_keeps_pending_updates_in_their_original_order() {
+        let boundary = LatchDelays::REBASE_TICK;
+        let mut delays = LatchDelays {
+            tick: boundary,
+            eliminated: Vec::new(),
+            source_rows: Vec::new(),
+            routes: Vec::new(),
+            initial: Vec::new(),
+            pending: BinaryHeap::from([Reverse((boundary + 3, 1, true)), Reverse((boundary + 1, 2, false))]),
+        };
+        let mut changes = Vec::new();
+        delays.advance();
+        delays.due(&mut changes);
+        assert_eq!(changes, [(2, false)]);
+        delays.advance();
+        delays.due(&mut changes);
+        assert_eq!(changes, [(2, false)]);
+        delays.advance();
+        delays.due(&mut changes);
+        assert_eq!(changes, [(2, false), (1, true)]);
     }
 }
