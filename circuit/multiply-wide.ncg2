@@ -1,0 +1,46 @@
+(namespace rv64::arithmetic
+  (export mul-wide)
+
+  (latch mul-wide-word (width 64))
+  (latch mul-wide-flag (width 1))
+
+  ;; 下位語の最下位ビットが1なら、上位語に被乗数を加える。
+  ;; 加算の桁上がりも含めて右に1ビットずらし、残りの128ビットを保持する。
+  (func mul-wide-round
+    (in (multiplicand (bits 64)) (lower (bits 64)) (upper (bits 64))
+        (round-mark (bits 64)) done (left (bits 64)) (right (bits 64)) initialize)
+    (out (next-multiplicand (bits 64)) (next-lower (bits 64)) (next-upper (bits 64))
+         (next-mark (bits 64)) next-done)
+    (def zero #x0000000000000000)
+    (def first-mark #x0000000000000001)
+    (def low-bit (bit lower 0))
+    (def addend (select low-bit zero multiplicand))
+    (def (carry sum) (add-64 upper addend 0))
+    (def sum-low (bit sum 0))
+    (def sum-high (slice sum 1 63))
+    (def lower-high (slice lower 1 63))
+    (def shifted-upper (concat sum-high carry))
+    (def shifted-lower (concat lower-high sum-low))
+    (def low-mark (slice round-mark 0 63))
+    (def moved-mark (concat 0 low-mark))
+    (def next-multiplicand (select initialize multiplicand left))
+    (def next-lower (select initialize shifted-lower right))
+    (def next-upper (select initialize shifted-upper zero))
+    (def next-mark (select initialize moved-mark first-mark))
+    (def last-round (bit round-mark 63))
+    (def unfinished (nor done last-round))
+    (def next-done (nor initialize unfinished)))
+
+  ;; 初期化の捕捉でオペランドを取り込み、以降64回の捕捉で積を計算する。
+  ;; low と high は done が1のときに積の下位と上位を表す。
+  ;; capture を1にする前に、前回の捕捉や入力変更から回路全体が安定するまで待つ。
+  (module mul-wide
+    (in (left (bits 64)) (right (bits 64)) initialize capture)
+    (out (low (bits 64)) (high (bits 64)) done)
+    (def (next-multiplicand next-lower next-upper next-mark next-done)
+      (mul-wide-round multiplicand low high round-mark done left right initialize))
+    (def multiplicand (mul-wide-word next-multiplicand capture))
+    (def low (mul-wide-word next-lower capture))
+    (def high (mul-wide-word next-upper capture))
+    (def round-mark (mul-wide-word next-mark capture))
+    (def done (mul-wide-flag next-done capture))))
