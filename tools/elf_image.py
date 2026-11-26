@@ -18,6 +18,9 @@ WORD_BITS = WORD_SIZE * 8
 WORD_COUNT = RAM_SIZE // WORD_SIZE
 ADDRESS_BITS = (WORD_COUNT - 1).bit_length()
 ENTRY = RAM_BASE
+BOOT_IMAGE_END = 0x52000
+BOOT_STACK_START = 0xFFF00
+BOOT_STACK_END = 0x104000
 ROM_ADDRESS_BITS = 5
 ROM_WORDS = 1 << ROM_ADDRESS_BITS
 ROM_END = RAM_BASE + ROM_WORDS * WORD_SIZE
@@ -79,7 +82,7 @@ class Segment:
     header_index: int
 
 
-def load_segments(elf: bytes) -> tuple[Segment, ...]:
+def load_segments(elf: bytes, *, image_end: int = RAM_END) -> tuple[Segment, ...]:
     """固定メモリ配置と整合する PT_LOAD を、開始アドレス順に返す。
 
     ファイルの抜け、ソースや RAM の範囲外、重複、先頭命令を置けない配置は ElfError を返す。
@@ -113,7 +116,7 @@ def load_segments(elf: bytes) -> tuple[Segment, ...]:
         if file_size > mem_size or offset + file_size > len(elf):
             raise ElfError(ErrorKind.SEGMENT, "ロードするバイト範囲がファイルまたはメモリサイズを越える。", index)
         # PC とデータのアドレスは同じ物理アドレス空間で扱う。
-        if vaddr != paddr or not RAM_BASE <= vaddr <= vaddr + mem_size <= RAM_END:
+        if vaddr != paddr or not RAM_BASE <= vaddr <= vaddr + mem_size <= image_end:
             raise ElfError(ErrorKind.SEGMENT, "仮想アドレスと物理アドレスが異なるか、指定 RAM の範囲外。", index)
         if align > 1 and ((align & (align - 1)) != 0 or vaddr % align != offset % align):
             raise ElfError(ErrorKind.SEGMENT, "PT_LOAD の整列条件を満たしていない。", index)
@@ -152,6 +155,37 @@ def memory_image(elf: bytes, *, layout: RomLayout | None = None) -> bytes:
         start = segment.address - RAM_BASE
         image[start:start + segment.file_size] = elf[segment.offset:segment.offset + segment.file_size]
     return bytes(image)
+
+
+def uart_boot_image(elf: bytes) -> bytes:
+    """ブート用の語数と RAM に書き込む語をリトルエンディアンで返す。
+
+    書き込み先は 0x10000 から連続する。最後の語に満たない分と領域間の隙間はゼロで埋める。
+    最後の初期化済みバイトより後ろの RAM は、リセット時のゼロを使う。
+    実行領域または別バンクのゼロ初期化領域に収まらない PT_LOAD は ElfError を返す。
+    """
+    segments = load_segments(elf, image_end=BOOT_STACK_END)
+    end_of_data = ENTRY
+    for segment in segments:
+        end = segment.address + segment.size
+        if end <= BOOT_IMAGE_END:
+            if segment.file_size:
+                end_of_data = max(end_of_data, segment.address + segment.file_size)
+            continue
+        if (BOOT_STACK_START <= segment.address and segment.file_size == 0
+                and segment.writable and not segment.executable):
+            continue
+        raise ElfError(ErrorKind.SEGMENT, "ロード領域が転送先 RAM またはゼロ初期化バンクに収まらない。",
+                       segment.header_index)
+
+    word_count = (end_of_data - ENTRY + WORD_SIZE - 1) // WORD_SIZE
+    stream = bytearray((word_count + 1) * WORD_SIZE)
+    struct.pack_into("<Q", stream, 0, word_count)
+    for segment in segments:
+        if segment.file_size:
+            start = WORD_SIZE + segment.address - ENTRY
+            stream[start:start + segment.file_size] = elf[segment.offset:segment.offset + segment.file_size]
+    return bytes(stream)
 
 
 def nonzero_words(image: bytes) -> Iterator[tuple[int, int]]:
@@ -267,7 +301,7 @@ def main() -> int:
     parser.add_argument("elf", type=Path)
     parser.add_argument("output", type=Path)
     encoders = {"image": bytes, "ncg2m": ncg2m_source, "word-bits": word_bits}
-    parser.add_argument("--format", choices=(*encoders, "ncg2-rom"), default="image")
+    parser.add_argument("--format", choices=(*encoders, "ncg2-rom", "uart-boot"), default="image")
     parser.add_argument("--rom-layout", choices=ROM_LAYOUTS, help="ncg2-rom の物理アドレス配置。既定は boot。")
     args = parser.parse_args()
     if args.elf.resolve() == args.output.resolve():
@@ -280,6 +314,8 @@ def main() -> int:
             layout = ROM_LAYOUTS[args.rom_layout or "boot"]
             image = memory_image(elf, layout=layout)
             data = ncg2_rom_source(image, address_bits=layout.address_bits)
+        elif args.format == "uart-boot":
+            data = uart_boot_image(elf)
         else:
             data = encoders[args.format](memory_image(elf))
         write_output(args.output, data)

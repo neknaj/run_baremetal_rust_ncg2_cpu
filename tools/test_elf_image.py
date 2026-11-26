@@ -4,7 +4,9 @@ import re
 import struct
 import unittest
 
-from elf_image import ROM_LAYOUTS, ErrorKind, ElfError, memory_image, ncg2_rom_source, ncg2m_source, word_bits
+from elf_image import (
+    ROM_LAYOUTS, ErrorKind, ElfError, memory_image, ncg2_rom_source, ncg2m_source, uart_boot_image, word_bits,
+)
 
 
 BASE = 0x10000
@@ -114,6 +116,29 @@ class LoaderTests(unittest.TestCase):
         with self.assertRaises(ElfError) as outcome:
             memory_image(executable([code, outside], payload), layout=core)
         self.assertEqual(outcome.exception.header_index, 1)
+
+    def test_uart_image_keeps_file_bytes_and_omits_trailing_zero_fill(self):
+        code = (1, 5, 0x200, BASE, BASE, 4, 8, 1)
+        data = (1, 6, 0x204, BASE + 16, BASE + 16, 3, 0x100, 1)
+        mailbox_and_stack = (1, 6, 0x207, 0xFFF00, 0xFFF00, 0, 0x4100, 1)
+        image = uart_boot_image(executable([mailbox_and_stack, data, code], b"1234abc"))
+        self.assertEqual(image, struct.pack("<Q", 3) + b"1234" + bytes(12) + b"abc" + bytes(5))
+
+    def test_uart_image_checks_application_and_stack_boundaries(self):
+        code = (1, 5, 0x200, BASE, BASE, 4, 4, 1)
+        last = (1, 6, 0x204, 0x51FFF, 0x51FFF, 1, 1, 1)
+        image = uart_boot_image(executable([code, last], b"1234x"))
+        self.assertEqual(struct.unpack_from("<Q", image), (0x8400,))
+        self.assertEqual(image[-1:], b"x")
+
+        for outside in (
+            (1, 6, 0x204, 0x51FFF, 0x51FFF, 1, 2, 1),
+            (1, 6, 0x204, 0xFFF00, 0xFFF00, 1, 1, 1),
+            (1, 6, 0x204, 0xFFF00, 0xFFF00, 0, 0x4101, 1),
+        ):
+            with self.subTest(outside=outside), self.assertRaises(ElfError) as outcome:
+                uart_boot_image(executable([code, outside], b"1234x"))
+            self.assertEqual((outcome.exception.kind, outcome.exception.header_index), (ErrorKind.SEGMENT, 1))
 
 
 if __name__ == "__main__":
