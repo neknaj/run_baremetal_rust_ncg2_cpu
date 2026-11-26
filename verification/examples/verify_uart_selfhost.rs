@@ -91,7 +91,7 @@ impl Machine {
         Ok(output[192])
     }
 
-    fn storage(&self, address_bits: usize) -> Result<&[bool], Box<dyn Error>> {
+    fn storage_index(&self, address_bits: usize) -> Result<usize, Box<dyn Error>> {
         let mut matches = (0..self.reference.storage_count()).filter(|&index| {
             self.reference
                 .storage_wiring(index)
@@ -103,26 +103,32 @@ impl Machine {
                             .is_some_and(|pins| pins.len() == address_bits)
                 })
         });
-        let memory = matches
-            .next()
-            .and_then(|index| self.event.ram_memory(index))
-            .ok_or("照合先の RAM が見つからない。")?;
+        let index = matches.next().ok_or("照合先の RAM が見つからない。")?;
         if matches.next().is_some() {
             return Err("照合先と同じアドレス幅の RAM が複数ある。".into());
         }
-        Ok(memory)
+        Ok(index)
+    }
+
+    fn read_word(
+        &self,
+        bank: usize,
+        address: u64,
+        address_bits: usize,
+    ) -> Result<u64, Box<dyn Error>> {
+        let memory = self
+            .event
+            .ram_memory(bank)
+            .ok_or("照合先の RAM の内容を取得できない。")?;
+        let start = ((address as usize >> 3) & ((1 << address_bits) - 1)) * 64;
+        let bits = memory
+            .get(start..start + 64)
+            .ok_or_else(|| format!("RAM の語 {address:#x} は範囲外。"))?;
+        Ok(uart::word(bits))
     }
 }
 
-fn memory_word(bank: &[bool], address: u64, address_bits: usize) -> Result<u64, Box<dyn Error>> {
-    let start = ((address as usize >> 3) & ((1 << address_bits) - 1)) * 64;
-    let bits = bank
-        .get(start..start + 64)
-        .ok_or_else(|| format!("RAM の語 {address:#x} は範囲外。"))?;
-    Ok(uart::word(bits))
-}
-
-fn image_words(image: &[u8]) -> Result<impl Iterator<Item = [u8; 8]> + '_, Box<dyn Error>> {
+fn image_words(image: &[u8]) -> Result<&[[u8; 8]], Box<dyn Error>> {
     let (words, tail) = image.as_chunks::<8>();
     let (header, payload) = words.split_first().ok_or("転送データに語数がない。")?;
     if !tail.is_empty()
@@ -131,7 +137,7 @@ fn image_words(image: &[u8]) -> Result<impl Iterator<Item = [u8; 8]> + '_, Box<d
     {
         return Err("転送ヘッダの語数とデータ長が一致しないか、容量を超える。".into());
     }
-    Ok(words.iter().copied())
+    Ok(words)
 }
 
 fn reference_pcs(path: &Path) -> Result<Vec<u64>, Box<dyn Error>> {
@@ -159,48 +165,64 @@ fn reference_pcs(path: &Path) -> Result<Vec<u64>, Box<dyn Error>> {
     Ok(pcs)
 }
 
-fn flash(machine: &mut Machine, image: &[u8]) -> Result<(), Box<dyn Error>> {
-    for _ in 0..uart::BIT_TICKS {
-        machine.step(true)?;
-    }
-    for (index, bytes) in image_words(image)?.enumerate() {
-        if !uart::send(bytes, |rx| -> Result<bool, Box<dyn Error>> {
-            let ready = machine.step(rx)?;
-            if machine.event.output()[194] && machine.pc() >= ENTRY {
-                return Err("転送中にアプリの命令が退役した。".into());
-            }
-            Ok(ready)
-        })? {
-            return Err(format!(
-                "転送語 {index} の ACK を受け取れない。PC={:#x}",
-                machine.pc()
-            )
-            .into());
-        }
-        if index > 0 && index % 256 == 0 {
-            println!("転送 {index} 語、tick {}", machine.tick);
-        }
-    }
-    if machine.pc() >= ENTRY {
-        return Err("転送内容の照合前にアプリが開始した。".into());
-    }
-    let program = machine.storage(15)?;
-    let tail = machine.storage(10)?;
-    for (offset, bytes) in image_words(image)?.skip(1).enumerate() {
+fn flash(machine: &mut Machine, words: &[[u8; 8]]) -> Result<(), Box<dyn Error>> {
+    let program = machine.storage_index(15)?;
+    let tail = machine.storage_index(10)?;
+    let check = |machine: &Machine, offset: usize, bytes: [u8; 8]| -> Result<(), Box<dyn Error>> {
         let address = ENTRY + offset as u64 * 8;
         let (bank, width) = if address < 0x50000 {
             (program, 15)
         } else {
             (tail, 10)
         };
-        if memory_word(bank, address, width)? != u64::from_le_bytes(bytes) {
-            return Err(format!("転送結果が RAM の {address:#x} で異なる。").into());
+        let actual = machine.read_word(bank, address, width)?;
+        let expected = u64::from_le_bytes(bytes);
+        if actual != expected {
+            return Err(format!("tick {}: 転送語 {} の書き込み先 RAM {address:#x} は {actual:#018x}、期待値は {expected:#018x}。", machine.tick, offset + 1).into());
         }
+        Ok(())
+    };
+    for _ in 0..uart::BIT_TICKS {
+        machine.step(true)?;
+    }
+    for (index, &bytes) in words.iter().enumerate() {
+        let acknowledged = uart::send(bytes, |rx| -> Result<bool, Box<dyn Error>> {
+            let ready = machine.step(rx)?;
+            if machine.event.output()[194] && machine.pc() >= ENTRY {
+                return Err("転送中にアプリの命令が退役した。".into());
+            }
+            Ok(ready)
+        })
+        .map_err(|cause| format!("UART 転送語 {index}: {cause}"))?;
+        if !acknowledged {
+            return Err(format!(
+                "転送語 {index} の ACK を受け取れない。PC={:#x}",
+                machine.pc()
+            )
+            .into());
+        }
+        if index > 0 {
+            check(machine, index - 1, bytes)?;
+            if index % 256 == 0 {
+                println!(
+                    "転送・照合 {index}/{} 語、tick {}",
+                    words.len() - 1,
+                    machine.tick
+                );
+            }
+        }
+    }
+    if machine.pc() >= ENTRY {
+        return Err("転送内容の照合前にアプリが開始した。".into());
+    }
+    // 後続の書き込みによって先に受け取った語が変わっていないことを確認する。
+    for (offset, &bytes) in words[1..].iter().enumerate() {
+        check(machine, offset, bytes)?;
     }
     println!(
         "転送完了、tick {}、全{}語一致",
         machine.tick,
-        image.len() / 8 - 1
+        words.len() - 1
     );
     Ok(())
 }
@@ -241,9 +263,9 @@ fn verify_execution(
         }
         machine.step(true)?;
     }
-    let stack = machine.storage(11)?;
-    let status = memory_word(stack, STATUS, 11)?;
-    let information = memory_word(stack, INFORMATION, 11)?;
+    let stack = machine.storage_index(11)?;
+    let status = machine.read_word(stack, STATUS, 11)?;
+    let information = machine.read_word(stack, INFORMATION, 11)?;
     if (status, information) != (1, info) {
         return Err(format!(
             "RAM の結果が QEMU と異なる。status={status:#x} information={information:#x}。"
@@ -275,8 +297,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("tick 上限には十進整数を指定する。")?
         .parse()?;
     let image = fs::read(image)?;
+    let words = image_words(&image)?;
     let reference = reference_pcs(Path::new(log))?;
     let mut machine = Machine::new(uart::machine(Path::new(project))?, limit)?;
-    flash(&mut machine, &image)?;
+    flash(&mut machine, words)?;
     verify_execution(&mut machine, &reference, info)
 }
