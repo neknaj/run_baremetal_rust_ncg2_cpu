@@ -51,7 +51,7 @@
       (firmware-dispatch instruction pc-offset first-value second-value
                          probe-data product fetch-valid probe-address))
     (def (probe-data readable writable)
-      (firmware-data-memory memory-address store-data memory-write))
+      (firmware-cpu-memory memory-address store-data memory-write))
 
     (def invalid (nor valid valid))
     (def failure (accept-pulse ready invalid))

@@ -146,4 +146,10 @@
     (def bss-data (firmware-bss bss-address ram-write-data bss-write))
     (def stack-data (firmware-stack stack-address ram-write-data stack-write))
     (def ram-data (::rv64::arithmetic::select stack bss-data stack-data))
-    (def read-data (::rv64::arithmetic::select rom ram-data rom-data))))
+    (def read-data (::rv64::arithmetic::select rom ram-data rom-data)))
+
+  ;; 起動デモでは命令の要求をそのままメモリへ渡す。
+  (module firmware-cpu-memory
+    (in (address (bits 64)) (write-data (bits 64)) write)
+    (out (read-data (bits 64)) readable writable)
+    (def (read-data readable writable) (firmware-data-memory address write-data write))))

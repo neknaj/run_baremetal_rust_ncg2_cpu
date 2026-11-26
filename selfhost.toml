@@ -10,6 +10,7 @@ sources = [
     "circuit/execute-control.ncg2",
     "selfhost/target/core-firmware.ncg2",
     "circuit/selfhost-memory.ncg2",
+    "circuit/selfhost-preload.ncg2",
     "circuit/execute-load.ncg2",
     "circuit/execute-logic.ncg2",
     "circuit/execute-alu.ncg2",

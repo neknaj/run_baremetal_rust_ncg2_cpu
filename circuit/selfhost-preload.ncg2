@@ -100,4 +100,10 @@
     (def (bus-address bus-data bus-write)
       (selfhost-route-request address write-data write
                              request-address request-data request-write finished ready))
-    (def (read-data readable writable) (firmware-data-memory bus-address bus-data bus-write))))
+    (def (read-data readable writable) (firmware-data-memory bus-address bus-data bus-write)))
+
+  ;; CPU は最初の命令を完了する前に入力設定を終える。
+  (module firmware-cpu-memory
+    (in (address (bits 64)) (write-data (bits 64)) write)
+    (out (read-data (bits 64)) readable writable)
+    (def (read-data readable writable ready) (selfhost-preloaded-memory address write-data write))))
