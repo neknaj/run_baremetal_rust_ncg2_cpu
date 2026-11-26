@@ -112,9 +112,21 @@
     (in restart (instruction (bits 32)) (destination (bits 5))
         (write-data (bits 64)) register-enable)
     (out (first-value (bits 64)) (second-value (bits 64)) ready issue)
+    (def seed (instruction-reset-seed))
+    (def (first-value second-value ready issue)
+      (instruction-window-from-seed seed restart instruction destination write-data register-enable)))
+
+  ;; リセット後の既存ブート経路で使う初回の命令要求。
+  (module instruction-reset-seed (in) (out seed)
     (def initialized (delay-1 1))
+    (def seed (nor initialized initialized)))
+
+  ;; seed を受け取るまでは命令を発行しない。起動後は退役の要求で次の命令を発行する。
+  (module instruction-window-from-seed
+    (in seed restart (instruction (bits 32)) (destination (bits 5))
+        (write-data (bits 64)) register-enable)
+    (out (first-value (bits 64)) (second-value (bits 64)) ready issue)
     (def started (delay-2 1))
-    (def seed (nor initialized initialized))
     (def raw-issue (execute-or seed restart))
     (def issue (phase-bit raw-issue started))
 
