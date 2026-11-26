@@ -244,4 +244,63 @@ pub proof fn completed_multiply_leaves_next_window_empty(
     isolated_multiply_stops_after_completion(start, capture, done, finished, first, last, next_first - 1);
 }
 
+/// CPU 内部の信号は tick 終了時の値で表す。
+/// tick 4 の初回 issue を除き、乗算を始めるには退役から commit と issue を経由する。
+pub open spec fn cpu_multiply_start_path(
+    start: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+    simple: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+) -> bool {
+    &&& forall|t: int| #[trigger] start(t) ==> issue(t - 1027)
+    &&& forall|t: int| #[trigger] issue(t) ==> t == 4 || commit(t - 3)
+    &&& forall|t: int| #[trigger] commit(t) ==> simple(t - 6) || finished(t - 6)
+}
+
+/// 一つの乗算の実行中に別の退役通知がなければ、次の開始までに反復は止まる。
+pub proof fn retirement_gap_clears_multiply_history(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+    simple: spec_fn(int) -> bool,
+    first_start: int,
+    last_capture: int,
+)
+    requires
+        multiply_control(start, capture, done, finished),
+        cpu_multiply_start_path(start, issue, commit, simple, finished),
+        first_start >= 1031,
+        first_start + 3 <= last_capture,
+        forall|t: int| first_start + 3 - 518 <= t < first_start + 3 ==> !(#[trigger] capture(t)),
+        forall|t: int| first_start - 1036 < t < last_capture + 6 ==> !(#[trigger] simple(t)),
+        forall|t: int| first_start - 1036 < t < last_capture + 6 ==> !(#[trigger] finished(t)),
+        capture(last_capture),
+        done(last_capture + 1),
+    ensures
+        forall|t: int| first_start - 1027 < t < last_capture + 15 ==> !(#[trigger] issue(t)),
+        forall|t: int| first_start < t < last_capture + 1042 ==> !(#[trigger] start(t)),
+        forall|t: int| last_capture < t < last_capture + 1045 ==> !(#[trigger] capture(t)),
+        forall|t: int| last_capture + 7 <= t <= last_capture + 1051 ==> !(#[trigger] finished(t)),
+{
+    assert forall|t: int| first_start - 1027 < t < last_capture + 15 implies !(#[trigger] issue(t)) by {
+        if issue(t) {
+            assert(t != 4);
+            assert(commit(t - 3));
+            assert(simple((t - 3) - 6) || finished((t - 3) - 6));
+            assert(!simple(t - 9));
+            assert(!finished(t - 9));
+        }
+    }
+    assert forall|t: int| first_start < t < last_capture + 1042 implies !(#[trigger] start(t)) by {
+        assert(!issue(t - 1027));
+    }
+    isolated_multiply_stops_after_completion(
+        start, capture, done, finished, first_start + 3, last_capture, last_capture + 1044,
+    );
+}
+
 } // verus!
