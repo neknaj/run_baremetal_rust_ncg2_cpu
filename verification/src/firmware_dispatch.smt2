@@ -26,11 +26,18 @@
 (define-fun auipc () Bool (= op #b0010111))
 (define-fun jal () Bool (= op #b1101111))
 (define-fun jalr () Bool (and (= op #b1100111) (= funct3 #b000)))
-(define-fun branch () Bool (and (= op #b1100011)
-                              (or (= funct3 #b000) (= funct3 #b001) (= funct3 #b111))))
+(define-fun branch () Bool
+  (and (= op #b1100011)
+       (or (= funct3 #b000) (= funct3 #b001) (= funct3 #b100)
+           (= funct3 #b101) (= funct3 #b110) (= funct3 #b111))))
 (define-fun take-branch () Bool
-  (and branch (ite (= funct3 #b000) (= rs1 rs2)
-               (ite (= funct3 #b001) (distinct rs1 rs2) (bvuge rs1 rs2)))))
+  (and branch
+       (or (and (= funct3 #b000) (= rs1 rs2))
+           (and (= funct3 #b001) (distinct rs1 rs2))
+           (and (= funct3 #b100) (bvslt rs1 rs2))
+           (and (= funct3 #b101) (bvsge rs1 rs2))
+           (and (= funct3 #b110) (bvult rs1 rs2))
+           (and (= funct3 #b111) (bvuge rs1 rs2)))))
 (define-fun ld () Bool (and (= op #b0000011) (= funct3 #b011)))
 (define-fun sd () Bool (and (= op #b0100011) (= funct3 #b011)))
 (define-fun lb () Bool (and (= op #b0000011) (= funct3 #b000)))
