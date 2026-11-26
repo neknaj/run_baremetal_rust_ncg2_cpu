@@ -53,18 +53,20 @@
 (define-fun mul () Bool
   (and (= op #b0110011) (= funct7 #b0000001) (or (= funct3 #b000) (= funct3 #b011))))
 (define-fun add () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b000)))
+(define-fun addiw () Bool (and (= op #b0011011) (= funct3 #b000)))
 (define-fun sub () Bool (and (= op #b0110011) (= funct7 #b0100000) (= funct3 #b000)))
 (define-fun and-register () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b111)))
 (define-fun or-register () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b110)))
 (define-fun srl () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b101)))
 (define-fun andi () Bool (and (= op #b0010011) (= funct3 #b111)))
+(define-fun ori () Bool (and (= op #b0010011) (= funct3 #b110)))
 (define-fun xori () Bool (and (= op #b0010011) (= funct3 #b100)))
 (define-fun sltiu () Bool (and (= op #b0010011) (= funct3 #b011)))
 (define-fun srli () Bool (and (= op #b0010011) (= funct3 #b101)
                            (= ((_ extract 31 26) instruction) #b000000)))
 (define-fun srai () Bool (and (= op #b0010011) (= funct3 #b101)
                            (= ((_ extract 31 26) instruction) #b010000)))
-(define-fun extended-alu () Bool (or add sub and-register or-register srl andi xori sltiu srli srai))
+(define-fun extended-alu () Bool (or add addiw sub and-register or-register srl andi ori xori sltiu srli srai))
 (define-fun immediate-shift () (_ BitVec 64) ((_ zero_extend 58) ((_ extract 25 20) instruction)))
 (define-fun register-shift () (_ BitVec 64) ((_ zero_extend 58) ((_ extract 5 0) rs2)))
 
@@ -163,11 +165,16 @@
                      (and sltu (distinct register-data
                        (ite (bvult rs1 rs2) (_ bv1 64) (_ bv0 64))))
                      (and add (distinct register-data (bvadd rs1 rs2)))
+                     (and addiw (distinct register-data
+                       ((_ sign_extend 32)
+                         (bvadd ((_ extract 31 0) rs1)
+                                ((_ sign_extend 20) ((_ extract 31 20) instruction))))))
                      (and sub (distinct register-data (bvsub rs1 rs2)))
                      (and and-register (distinct register-data (bvand rs1 rs2)))
                      (and or-register (distinct register-data (bvor rs1 rs2)))
                      (and srl (distinct register-data (bvlshr rs1 register-shift)))
                      (and andi (distinct register-data (bvand rs1 immediate-i)))
+                     (and ori (distinct register-data (bvor rs1 immediate-i)))
                      (and xori (distinct register-data (bvxor rs1 immediate-i)))
                      (and sltiu (distinct register-data
                        (ite (bvult rs1 immediate-i) (_ bv1 64) (_ bv0 64))))

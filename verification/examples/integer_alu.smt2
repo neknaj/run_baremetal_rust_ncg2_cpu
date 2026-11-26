@@ -12,12 +12,16 @@
 
 (define-fun add () Bool
   (and (= opcode #b0110011) (= funct7 #b0000000) (= funct3 #b000)))
+(define-fun addiw () Bool
+  (and (= opcode #b0011011) (= funct3 #b000)))
 (define-fun and-register () Bool
   (and (= opcode #b0110011) (= funct7 #b0000000) (= funct3 #b111)))
 (define-fun andi () Bool
   (and (= opcode #b0010011) (= funct3 #b111)))
 (define-fun or-register () Bool
   (and (= opcode #b0110011) (= funct7 #b0000000) (= funct3 #b110)))
+(define-fun ori () Bool
+  (and (= opcode #b0010011) (= funct3 #b110)))
 (define-fun sltiu () Bool
   (and (= opcode #b0010011) (= funct3 #b011)))
 (define-fun srai () Bool
@@ -31,7 +35,7 @@
 (define-fun xori () Bool
   (and (= opcode #b0010011) (= funct3 #b100)))
 (define-fun accepted () Bool
-  (or add and-register andi or-register sltiu srai srl srli sub xori))
+  (or add addiw and-register andi or-register ori sltiu srai srl srli sub xori))
 
 ; 命令語全体で受理と拒否を確認する。
 (push)
@@ -43,6 +47,14 @@
 (push)
 (assert add)
 (assert (distinct result (bvadd rs1 rs2)))
+(check-sat)
+(pop)
+
+(push)
+(assert addiw)
+(assert (distinct result
+  ((_ sign_extend 32)
+    (bvadd ((_ extract 31 0) rs1) ((_ sign_extend 20) ((_ extract 31 20) instruction))))))
 (check-sat)
 (pop)
 
@@ -61,6 +73,12 @@
 (push)
 (assert or-register)
 (assert (distinct result (bvor rs1 rs2)))
+(check-sat)
+(pop)
+
+(push)
+(assert ori)
+(assert (distinct result (bvor rs1 immediate)))
 (check-sat)
 (pop)
 

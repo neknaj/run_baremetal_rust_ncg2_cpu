@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|&wire| depth(wire, &depths))
         .max()
         .unwrap();
-    assert!(maximum <= 469);
+    assert!(maximum <= 478, "execute-alu depth {maximum}");
     eprintln!("execute-alu: {} NORs, depth {maximum}", netlist.gates.len());
     Ok(())
 }
