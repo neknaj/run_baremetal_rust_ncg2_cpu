@@ -1,0 +1,30 @@
+(namespace rv64
+  (export firmware-demo)
+
+  (func result-address (in read-product) (out (address (bits 64)))
+    (def status #x000000000002fff0)
+    (def product #x000000000002fff8)
+    (def address (::rv64::arithmetic::select read-product status product)))
+
+  ;; 起動 ELF は積を書き込んだ後で、結果領域にゼロ以外の終了状態を書き込む。
+  ;; まず状態を読み、その後に積を読む。finished が立った時点の2語を保持する。
+  (module firmware-demo
+    (in)
+    (out (pc-offset (bits 64)) (status (bits 64)) (product (bits 64)) finished stopped)
+    (def address (result-address read-product))
+    (def (pc-offset data actual-address register-data register-write memory-write commit stopped)
+      (firmware-machine address))
+    (def (matching unused-less) (::rv64::arithmetic::compare-unsigned address actual-address))
+    (def status-present (any-bit-64 data))
+    (def waiting-status (nor read-product read-product))
+    (def status-ready (execute-and waiting-status status-present))
+    (def status-matches (execute-and matching status-ready))
+    (def capture-status (accept-pulse commit status-matches))
+    (def status (operand data capture-status))
+    (def read-product (phase-bit 1 capture-status))
+    (def pending-product (nor finished finished))
+    (def needs-product (execute-and read-product pending-product))
+    (def product-matches (execute-and matching needs-product))
+    (def capture-product (accept-pulse commit product-matches))
+    (def product (operand data capture-product))
+    (def finished (phase-bit 1 capture-product))))

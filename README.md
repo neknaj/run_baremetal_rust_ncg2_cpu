@@ -2,6 +2,17 @@
 
 Neknaj Circuit Game 2 で RV64IM の CPU を組み、ベアメタル Rust のプログラムを動かす。最終的には、その CPU 上でも NCG2 Core で回路を評価できるようにする。
 
+## Rust の起動プログラムを実行する
+
+`firmware.toml` は、リポジトリに同梱した Rust ELF のイメージを読む NCG2 回路を起動する。実行に Python や QEMU は不要で、`ncg2` の `run` で tick を進める。
+
+```sh
+ncg2 check --project firmware.toml
+ncg2 run --project firmware.toml --ticks 90000 | tail -n 1
+```
+
+最終行のビット列は PC オフセット・終了状態・積を64ビットずつ、続いて `finished` と `stopped` を1ビットずつ並べる。このプログラムの結果は PC オフセット `0x64`、終了状態 `1`、積 `0x0000_0005_0000_0003`、`finished=1`、`stopped=0` である。各ポートは最下位ビットから表示する。[実行回路と検証手順](doc/firmware-execution.md)
+
 ## 起動 ROM を実行する
 
 `circuitgame2.toml` のエントリは起動 ROM、レジスタ、実行回路、RAM をつないだ `::rv64::boot-machine` である。リセット後に tick を進めると、ROM の6命令が順に実行される。
@@ -13,7 +24,7 @@ ncg2 run --project circuitgame2.toml --input 11111111111
 
 この `run` は1 tick 進める。入力の11ビットは RAM の観測用アドレスで、すべて1にすると末尾の語を指定する。全6命令を実行する結合テストでは、物理アドレス `0x2fff8` に `0x0000000100000003` が書かれ、最後の JAL が同じ PC に戻ることを確認する。実行時の信号と検査手順は[起動回路](doc/boot-execution.md)を参照。
 
-この回路が現在実行するのは、5種類の命令を使う固定 ROM である。コンパイル済み Rust を実行するための命令拡張と NCG2M のイメージの接続は作業中である。
+この構成は固定6命令の回路を試すためのものである。
 
 ## 命令デコーダを試す
 
@@ -68,7 +79,7 @@ python tools/elf_image.py target/riscv64im-unknown-none-elf/release/ncg2-rv64-bo
   circuit/firmware-rom.ncg2 --format ncg2-rom
 ```
 
-フェッチと、ROM・BSS・スタックの読み書き回路は[起動 ELF のメモリ配置](doc/firmware-memory.md)に記す。現在のプロジェクトの実行入口は固定6命令の起動回路である。
+フェッチと、ROM・BSS・スタックの読み書き回路は[起動 ELF のメモリ配置](doc/firmware-memory.md)に記す。
 
 ## NCG2M のプログラムデータ
 
@@ -79,7 +90,7 @@ python tools/elf_image.py target/riscv64im-unknown-none-elf/release/ncg2-rv64-bo
 ncg2 check programs/boot.ncg2m
 ```
 
-固定 ROM から、プロジェクト内の命令イメージを NCG2M で展開した ROM に移行する。
+実行用の NCG2 ROM を、この NCG2M データから展開する経路は作業中である。
 
 ## 起動回路の部品を検証する
 
@@ -90,7 +101,7 @@ set -e
 host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
 mkdir -p target/verification
 for circuit in add shift-left xor compare-unsigned less-than-unsigned \
-  boot-ram-address execute-boot execute-control; do
+  boot-ram-address execute-boot execute-control execute-load execute-logic mul-round; do
   model="target/verification/$circuit.smt2"
   cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
     --target "$host" --target-dir target/verification -- "$circuit" > "$model"

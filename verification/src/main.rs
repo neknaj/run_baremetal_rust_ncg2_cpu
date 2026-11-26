@@ -5,6 +5,7 @@ use circuitgame2_core::{
     project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project},
 };
 mod firmware;
+mod multiply;
 
 fn name(wire: Wire) -> String {
     match wire {
@@ -20,12 +21,31 @@ fn vector(bits: impl Iterator<Item = String> + DoubleEndedIterator) -> String {
     reversed.fold(highest, |prefix, bit| format!("(concat {prefix} {bit})"))
 }
 
+/// 固定入力が出力へ届くまでの上界を、展開した NOR の依存経路から求める。
+fn maximum_depth(netlist: &NorNetlist) -> usize {
+    let mut depths = Vec::with_capacity(netlist.gates.len());
+    let depth = |wire, depths: &[usize]| match wire {
+        Wire::Input(_) | Wire::Constant(_) => 0,
+        Wire::Gate(index) => depths[index],
+    };
+    for gate in &netlist.gates {
+        depths.push(depth(gate.left, &depths).max(depth(gate.right, &depths)) + 1);
+    }
+    netlist
+        .outputs
+        .iter()
+        .map(|&wire| depth(wire, &depths))
+        .max()
+        .unwrap_or(0)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let Some(
         selected @ ("add" | "shift-left" | "boot-ram-address" | "execute-boot" | "firmware-rom"
         | "firmware-fetch" | "firmware-data-map" | "execute-control" | "xor"
-        | "compare-unsigned" | "less-than-unsigned"),
+        | "compare-unsigned" | "less-than-unsigned" | "execute-load" | "execute-logic"
+        | "mul-round"),
     ) = args.get(1).map(String::as_str)
     else {
         return Err("検証対象の NCG2 関数名を指定する。対象は README と各設計文書を参照。".into());
@@ -49,6 +69,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "arithmetic.ncg2",
             "execute-boot.ncg2",
             "execute-control.ncg2",
+        ],
+        "execute-logic" => &[
+            "decode.ncg2",
+            "arithmetic.ncg2",
+            "execute-boot.ncg2",
+            "execute-logic.ncg2",
+        ],
+        "mul-round" => &["decode.ncg2", "arithmetic.ncg2", "multiply.ncg2"],
+        "execute-load" => &[
+            "decode.ncg2",
+            "arithmetic.ncg2",
+            "boot-rom.ncg2",
+            "fetch-boot.ncg2",
+            "execute-boot.ncg2",
+            "firmware-rom.ncg2",
+            "firmware-memory.ncg2",
+            "execute-load.ncg2",
         ],
         "firmware-rom" => &["decode.ncg2", "arithmetic.ncg2", "firmware-rom.ncg2"],
         "firmware-fetch" | "firmware-data-map" => &[
@@ -108,12 +145,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "boot-ram-address" => (64, 12),
         "execute-boot" => (224, 264),
         "execute-control" => (224, 136),
+        "execute-load" => (96, 71),
+        "execute-logic" => (160, 66),
+        "mul-round" => (386, 257),
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
         "firmware-data-map" => (64, 28),
         _ => unreachable!(),
     };
     assert_eq!((*input_count, outputs.len()), expected_shape);
+    let depth_limit = match selected {
+        "firmware-fetch" => Some(24),
+        "execute-boot" => Some(475),
+        "execute-control" => Some(493),
+        "execute-load" => Some(468),
+        "execute-logic" => Some(31),
+        "mul-round" => Some(457),
+        _ => None,
+    };
+    if let Some(limit) = depth_limit {
+        let depth = maximum_depth(built.netlist());
+        eprintln!("{selected}: {} NORs, depth {depth}", gates.len());
+        assert!(depth <= limit);
+    }
     if selected == "firmware-data-map" {
         let bank_form = circuit
             .names
@@ -153,6 +207,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firmware::emit_rom(selected, outputs, &std::fs::read(path)?)?;
     } else if selected == "firmware-data-map" {
         firmware::emit_data_map(outputs);
+    } else if selected == "mul-round" {
+        multiply::emit(outputs);
+    } else if matches!(selected, "execute-load" | "execute-logic") {
+        let instruction = vector((0..32).map(|i| format!("i{i}")));
+        let rs1 = vector((32..96).map(|i| format!("i{i}")));
+        println!("(define-fun instruction () (_ BitVec 32) {instruction})");
+        println!("(define-fun rs1 () (_ BitVec 64) {rs1})");
+        if selected == "execute-load" {
+            let address = vector(outputs[2..66].iter().copied().map(name));
+            let rd = vector(outputs[66..71].iter().copied().map(name));
+            println!("(define-fun is-ld () Bool {})", name(outputs[0]));
+            println!("(define-fun valid () Bool {})", name(outputs[1]));
+            println!("(define-fun address () (_ BitVec 64) {address})");
+            println!("(define-fun register-index () (_ BitVec 5) {rd})");
+            print!("{}", include_str!("execute_load.smt2"));
+        } else {
+            let rs2 = vector((96..160).map(|i| format!("i{i}")));
+            let result = vector(outputs[2..66].iter().copied().map(name));
+            println!("(define-fun rs2 () (_ BitVec 64) {rs2})");
+            println!("(define-fun recognized () Bool {})", name(outputs[0]));
+            println!("(define-fun multiply () Bool {})", name(outputs[1]));
+            println!("(define-fun result () (_ BitVec 64) {result})");
+            print!("{}", include_str!("execute_logic.smt2"));
+        }
     } else if matches!(selected, "execute-boot" | "execute-control") {
         for (port, start, stop) in [
             ("instruction", 0, 32),

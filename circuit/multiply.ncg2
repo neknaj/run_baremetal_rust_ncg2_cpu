@@ -1,0 +1,48 @@
+(namespace rv64::arithmetic
+  (export mul-low)
+
+  (latch mul-word (width 64))
+  (latch mul-flag (width 1))
+
+  ;; MUL の1回分の更新を計算する。initialize が1なら被乗数と乗数を読み込み、
+  ;; 積と完了ビットを0に戻し、反復回数を示すビット列を1で初期化する。
+  ;; 初期化以外の更新では、乗数の最下位ビットが1のときだけ被乗数を加える。
+  ;; 被乗数を左、乗数を右に1ビットずつずらす。
+  ;; 反復回数を示すビット列のビット63が1のときに最後の加算を行い、完了ビットも同時に立てる。
+  (func mul-round
+    (in (multiplicand (bits 64)) (multiplier (bits 64)) (accumulated (bits 64))
+        (round-mark (bits 64)) done (left (bits 64)) (right (bits 64)) initialize)
+    (out (next-multiplicand (bits 64)) (next-multiplier (bits 64))
+         (next-accumulated (bits 64)) (next-mark (bits 64)) next-done)
+    (def zero #x0000000000000000)
+    (def first-mark #x0000000000000001)
+    (def low-bit (bit multiplier 0))
+    (def addend (select low-bit zero multiplicand))
+    (def sum (add accumulated addend))
+    (def low-multiplicand (slice multiplicand 0 63))
+    (def high-multiplier (slice multiplier 1 63))
+    (def low-mark (slice round-mark 0 63))
+    (def moved-multiplicand (concat 0 low-multiplicand))
+    (def moved-multiplier (concat high-multiplier 0))
+    (def moved-mark (concat 0 low-mark))
+    (def next-multiplicand (select initialize moved-multiplicand left))
+    (def next-multiplier (select initialize moved-multiplier right))
+    (def next-accumulated (select initialize sum zero))
+    (def next-mark (select initialize moved-mark first-mark))
+    (def last-round (bit round-mark 63))
+    (def unfinished (nor done last-round))
+    (def next-done (nor initialize unfinished)))
+
+  ;; capture を1にした tick で状態を更新する。初期化の書き込みに続けて、
+  ;; initialize を0にした状態で64回書き込むと、done と積の下位64ビットが同時に確定する。
+  ;; 前回の書き込みや入力変更から組み合わせ部分が安定するまで capture を0に保つ。
+  (module mul-low
+    (in (left (bits 64)) (right (bits 64)) initialize capture)
+    (out (product (bits 64)) done)
+    (def (next-multiplicand next-multiplier next-product next-mark next-done)
+      (mul-round multiplicand multiplier product round-mark done left right initialize))
+    (def multiplicand (mul-word next-multiplicand capture))
+    (def multiplier (mul-word next-multiplier capture))
+    (def product (mul-word next-product capture))
+    (def round-mark (mul-word next-mark capture))
+    (def done (mul-flag next-done capture))))

@@ -106,6 +106,36 @@
     (def mapped (nor mismatch mismatch))
     (def word (slice address 3 11)))
 
+  ;; リセット後、または1命令の完了後に、単一ポートのレジスタを順に読む。
+  ;; ready が立つまで、アドレス計算とメモリの読み出しを終える猶予を取る。
+  (module instruction-window
+    (in restart (instruction (bits 32)) (destination (bits 5))
+        (write-data (bits 64)) register-enable)
+    (out (first-value (bits 64)) (second-value (bits 64)) ready)
+    (def initialized (delay-1 1))
+    (def started (delay-2 1))
+    (def seed (nor initialized initialized))
+    (def raw-issue (execute-or seed restart))
+    (def issue (phase-bit raw-issue started))
+
+    (def capture-first (delay-64 issue))
+    (def select-second (delay-16 capture-first))
+    (def capture-second (delay-32 select-second))
+    (def select-write (delay-16 capture-second))
+    ;; 最後のオペランドは issue の113 tick 後に確定する。
+    ;; PC 相対命令の NOR は最大493段。メモリや結果選択の遅延も含め1024 tick まで待つ。
+    (def ready (delay-1024 issue))
+    (def second-mode (phase-mode select-second issue))
+    (def write-mode (phase-mode select-write issue))
+
+    (def (opcode rd funct3 rs1 rs2 funct7 imm-i imm-s imm-b imm-u imm-j)
+      (decode instruction))
+    (def read-index (select-index second-mode rs2 rs1))
+    (def register-index (select-index write-mode destination read-index))
+    (def read-value (register-file register-index write-data register-enable))
+    (def first-value (operand read-value capture-first))
+    (def second-value (operand read-value capture-second)))
+
   ;; 起動 ROM の命令を順に実行する。commit は1 tick だけ立ち、その次の tick に PC が更新される。
   ;; 未対応命令や RAM の範囲外への書き込みでは stopped が立ち、次の命令を開始しない。
   ;; probe-data は同じ出力フレームの probe-response が指す RAM の更新前の値。
@@ -114,31 +144,10 @@
     (in (probe-address (bits 11)))
     (out (pc-offset (bits 64)) (probe-data (bits 64))
          (probe-response (bits 11)) commit stopped)
-    (def initialized (delay-1 1))
-    (def started (delay-2 1))
-    (def seed (nor initialized initialized))
-    (def raw-issue (execute-or seed commit))
-    (def issue (phase-bit raw-issue started))
-
-    (def capture-first (delay-64 issue))
-    (def select-second (delay-16 capture-first))
-    (def capture-second (delay-32 select-second))
-    (def select-write (delay-16 capture-second))
-    ;; Core で展開した実行回路は最大475段。最後のレジスタ読み出しは issue の112 tick 後なので、
-    ;; issue の1024 tick 後まで待ち、ストア先の範囲検査と RAM アドレスの選択も確定させる。
-    (def retire (delay-1024 issue))
-    (def second-mode (phase-mode select-second issue))
-    (def write-mode (phase-mode select-write issue))
-
     (def pc-offset (program-counter next-offset commit))
     (def (instruction fetch-valid) (fetch-boot pc-offset))
-    (def (opcode rd funct3 rs1 rs2 funct7 imm-i imm-s imm-b imm-u imm-j)
-      (decode instruction))
-    (def read-index (select-index second-mode rs2 rs1))
-    (def register-index (select-index write-mode destination read-index))
-    (def read-value (register-file register-index write-data register-enable))
-    (def first-value (operand read-value capture-first))
-    (def second-value (operand read-value capture-second))
+    (def (first-value second-value retire)
+      (instruction-window commit instruction destination write-data register-enable))
 
     (def (execute-valid next-offset destination write-data write-register
           store-address store-data write-memory)
