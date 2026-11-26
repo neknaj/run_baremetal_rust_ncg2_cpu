@@ -1,4 +1,6 @@
-# Rust 起動プログラムの実行
+# Rust 起動回路の構成と検証
+
+ELF を用意して実行する手順は[自作のベアメタル Rust を動かす](run-your-rust.md)を参照する。
 
 `::rv64::firmware-machine` は起動 ELF を格納した ROM をフェッチし、レジスタとデータメモリを更新する。リセット時に起動アドレス `0x10000` から実行を始める。起動プログラムの命令と、セルフホスト用 ELF に必要な追加の算術・メモリ命令を扱う。[起動用命令](boot-execution.md) · [分岐と PC 相対命令](control-execution.md) · [整数 ALU](integer-alu.md) · [部分書き込み](subword-memory.md)
 
@@ -24,6 +26,37 @@ cargo +1.99.1 test --release --locked --manifest-path verification/Cargo.toml \
   --target "$host" --target-dir target/verification --test firmware_machine
 ```
 
-`firmware-dispatch` と `firmware-dispatch-core` の検証では、起動デモ用とセルフホスト用のメモリ配置をそれぞれ選ぶ。任意の命令語、PC、レジスタ値、フェッチの成否、メモリの読み出し値と乗算の結果について、受理条件、次の PC、レジスタと RAM への更新要求、書き込む値を参照仕様と照合する。無効な入力では PC オフセットを保持し、両方の更新要求を抑止することも検証する。実際に更新する tick は CPU の結合テストで確認する。[組み合わせ回路と乗算の検証手順](https://github.com/neknaj/run_baremetal_rust_ncg2_cpu#起動回路の部品を検証する)
+`firmware-dispatch` と `firmware-dispatch-core` の検証では、起動デモ用とセルフホスト用のメモリ配置をそれぞれ選ぶ。任意の命令語、PC、レジスタ値、フェッチの成否、メモリの読み出し値と乗算の結果について、受理条件、次の PC、レジスタと RAM への更新要求、書き込む値を参照仕様と照合する。無効な入力では PC オフセットを保持し、両方の更新要求を抑止することも検証する。実際に更新する tick は CPU の結合テストで確認する。[組み合わせ回路と乗算の検証手順](boot-components.md#起動回路の部品を検証する)
 
 小型の Core ELF は CPU 上で実行済みである。より大きな Core ELF の UART 転送から終了までの照合、CPU 全体の形式証明、未対応の RV64IM 命令の実装が残る。[Core の実行と検証](selfhost.md)
+
+## 同梱の起動 ELF を再生成する
+
+```sh
+rustup toolchain install nightly --profile minimal --component rust-src
+cargo +nightly build --release --locked -Z build-std=core
+```
+
+成果物は `target/riscv64im-unknown-none-elf/release/ncg2-rv64-boot`。ELF のロード領域を配置したあと、`0x10000` から実行する。起動コードがスタックを用意して BSS を消去し、Rust の `rust_main` を呼ぶ。`boot_halt` 到達後に RAM の `0x2fff0` が成功値 `1`、`0x2fff8` が `0x0000_0005_0000_0003` なら検査成功。A・C・F・D を無効にした QEMU ユーザーモードで確認した。
+
+## ELF を回路のメモリに載せる
+
+`circuit/firmware-rom.ncg2` は、起動 ELF の命令と読み取り専用データを格納する。通常の実行は NCG2 のファイルを使う。Rust を変更したときに、生成済み ROM を更新する。
+
+```sh
+python3 tools/elf_image.py target/riscv64im-unknown-none-elf/release/ncg2-rv64-boot \
+  circuit/firmware-rom.ncg2 --format ncg2-rom
+```
+
+フェッチと、ROM・BSS・スタックの読み書き回路は[起動 ELF のメモリ配置](firmware-memory.md)に記す。
+
+## NCG2M のプログラムデータ
+
+`programs/boot.ncg2m` は、RAM の初期内容を64ビット語の添字と値で表す。省略した語の値は0。Rust を変更したときは、開発時に ELF から更新する。
+
+```sh
+python3 tools/elf_image.py target/riscv64im-unknown-none-elf/release/ncg2-rv64-boot programs/boot.ncg2m --format ncg2m
+ncg2 check programs/boot.ncg2m
+```
+
+実行用の NCG2 ROM を、この NCG2M データから展開する経路は作業中である。

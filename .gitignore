@@ -1,4 +1,5 @@
 /target/
 /book/
+/firmware-local.toml
 /selfhost/target/
 __pycache__/
