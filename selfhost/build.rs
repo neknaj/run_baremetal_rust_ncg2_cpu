@@ -1,5 +1,12 @@
-//! リンカスクリプトの変更時に起動 ELF をリンクし直す。
+//! 実行するセルフホストプログラムのメモリ配置を選ぶ。
 
 fn main() {
-    println!("cargo:rerun-if-changed=memory.x");
+    let root = env!("CARGO_MANIFEST_DIR");
+    let script = if cfg!(feature = "compile-circuit") {
+        "memory-compile.x"
+    } else {
+        "memory.x"
+    };
+    println!("cargo:rerun-if-changed={script}");
+    println!("cargo:rustc-link-arg=-T{root}/{script}");
 }

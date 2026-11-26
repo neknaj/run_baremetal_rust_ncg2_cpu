@@ -1,11 +1,13 @@
 #![no_std]
 #![no_main]
 
-//! RAM から1件の要求を読み、Core の厳格 S 式解析と NOR 評価を実行する。
+//! RAM から1件の要求を読み、ビルドで選んだ Core の処理を実行する。
 
 extern crate alloc;
 
+#[cfg(not(feature = "compile-circuit"))]
 use alloc::vec;
+#[cfg(not(feature = "compile-circuit"))]
 use circuitgame2_core::netlist::{NorGate, NorNetlist, Wire};
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::global_asm;
@@ -13,9 +15,15 @@ use core::cell::UnsafeCell;
 use core::panic::PanicInfo;
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
+#[cfg(feature = "compile-circuit")]
+mod compile;
+
 global_asm!(include_str!("start.S"));
 
+#[cfg(not(feature = "compile-circuit"))]
 const HEAP_SIZE: usize = 8192;
+#[cfg(feature = "compile-circuit")]
+const HEAP_SIZE: usize = 16_384;
 const SOURCE_CAPACITY: usize = 128;
 
 #[repr(align(64))]
@@ -34,7 +42,10 @@ unsafe impl GlobalAlloc for Heap {
         let used = self.used.get();
         // SAFETY: 割り当て済みの長さを読み書きするのは単一ハートだけである。
         let offset = unsafe { *used };
-        let Some(start) = base.checked_add(offset).and_then(|p| p.checked_add(layout.align() - 1)) else {
+        let Some(start) = base
+            .checked_add(offset)
+            .and_then(|p| p.checked_add(layout.align() - 1))
+        else {
             return core::ptr::null_mut();
         };
         let offset = (start & !(layout.align() - 1)) - base;
@@ -55,7 +66,10 @@ unsafe impl GlobalAlloc for Heap {
 }
 
 #[global_allocator]
-static ALLOCATOR: Heap = Heap { bytes: UnsafeCell::new([0; HEAP_SIZE]), used: UnsafeCell::new(0) };
+static ALLOCATOR: Heap = Heap {
+    bytes: UnsafeCell::new([0; HEAP_SIZE]),
+    used: UnsafeCell::new(0),
+};
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -73,11 +87,18 @@ struct ResultWords {
 
 #[used]
 #[unsafe(link_section = ".request")]
-static mut REQUEST: Request = Request { source_length: 0, inputs: 0, source: [0; SOURCE_CAPACITY] };
+static mut REQUEST: Request = Request {
+    source_length: 0,
+    inputs: 0,
+    source: [0; SOURCE_CAPACITY],
+};
 
 #[used]
 #[unsafe(link_section = ".result")]
-static mut RESULT: ResultWords = ResultWords { status: 0, information: 0 };
+static mut RESULT: ResultWords = ResultWords {
+    status: 0,
+    information: 0,
+};
 
 fn publish(status: u64, information: u64) {
     // SAFETY: リンカが結果専用に確保した領域へ、単一ハートが書き込む。
@@ -101,22 +122,43 @@ extern "C" fn rust_main() {
         publish(3, 0);
         return;
     };
-    let Ok(parsed) = circuitgame2_core::syntax::parse(source) else {
-        publish(4, 0);
-        return;
+    #[cfg(not(feature = "compile-circuit"))]
+    let result = {
+        let Ok(parsed) = circuitgame2_core::syntax::parse(source) else {
+            publish(4, 0);
+            return;
+        };
+        let netlist = NorNetlist {
+            input_count: 2,
+            gates: vec![NorGate {
+                left: Wire::Input(0),
+                right: Wire::Input(1),
+            }],
+            outputs: vec![Wire::Gate(0)],
+        };
+        let Ok(output) = netlist.evaluate(&[request.inputs & 1 != 0, request.inputs & 2 != 0])
+        else {
+            publish(5, 0);
+            return;
+        };
+        (parsed.len(), output[0])
     };
-    let netlist = NorNetlist {
-        input_count: 2,
-        gates: vec![NorGate { left: Wire::Input(0), right: Wire::Input(1) }],
-        outputs: vec![Wire::Gate(0)],
-    };
-    let Ok(output) = netlist.evaluate(&[request.inputs & 1 != 0, request.inputs & 2 != 0]) else {
-        publish(5, 0);
-        return;
+
+    #[cfg(feature = "compile-circuit")]
+    let result = match compile::evaluate(source, request.inputs) {
+        Ok(value) => value,
+        Err(status) => {
+            publish(status, 0);
+            return;
+        }
     };
     // SAFETY: 割り当て処理と同じ単一ハートから、現在の予約済みサイズを読む。
     let heap_used = unsafe { *ALLOCATOR.used.get() } as u64;
-    publish(1, (heap_used << 16) | (u64::from(output[0]) << 8) | parsed.len() as u64);
+    let (node_count, output) = result;
+    publish(
+        1,
+        (heap_used << 16) | (u64::from(output) << 8) | node_count as u64,
+    );
 }
 
 #[panic_handler]

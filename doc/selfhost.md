@@ -1,6 +1,6 @@
 # Core を組み込んだ RV64IM ELF
 
-`selfhost/` には固定版の NCG2 Core を呼ぶベアメタル Rust プログラムを置く。RAM にある1件の要求から UTF-8 のソースを取り出し、厳格 S 式パーサーで解析する。次に Core で2入力の NOR を評価し、解析結果のノード数と評価結果を RAM に書く。評価に使う1ゲートのネットリストはこのプログラムが用意する。
+`selfhost/` には固定版の NCG2 Core を呼ぶベアメタル Rust プログラムを置く。既定のプログラムは RAM にある1件の要求から UTF-8 のソースを取り出し、厳格 S 式パーサーで解析する。次に Core で2入力の NOR を評価し、解析結果のノード数と評価結果を RAM に書く。評価に使う1ゲートのネットリストはこのプログラムが用意する。
 
 ## ELF のビルド
 
@@ -68,6 +68,32 @@ cargo +1.99.1 run --locked --release --manifest-path verification/Cargo.toml \
 引数の末尾に `--event` を付けると、実ネットリストを疎実行する。最初の14,500 tick は標準 VM でも進め、各 tick の公開出力の一致を確認する。疎実行器は開発時の検証に使う。標準 VM との一般の同値性を機械検証する作業は今後の課題である。[疎実行の状態更新](event-clocked.md)
 
 この ELF を疎実行器で実行すると、15,309,127 tick で終了した。PC 遷移14,233件と結果2語（`0x1`、`0x07e00113`）が QEMU と一致した。
+
+## RAM の回路ソースを展開する ELF
+
+`compile-circuit` を指定すると、受け取った回路ソースを Core で構文解析し、定義を検査して名前を解決する。ソース内の1入力・1出力の `invert` を NOR に展開し、要求の入力値の最下位ビットで評価する。ヒープとスタックは各16 KiB。別の出力先を指定すると、既定の ELF を残したままビルドできる。
+
+```sh
+cd selfhost
+python prepare_vstd.py target/vendor/vstd
+RUSTC_BOOTSTRAP=1 cargo build --release --locked -Z build-std=core,alloc \
+  --features compile-circuit --target-dir target/compile
+cd ..
+```
+
+リンカはアプリを `0x10000` に置き、`0x51f00..0x52000` の256バイトをゼロ初期化の要求窓として予約する。先頭の144バイトの形式は既定のプログラムと共通で、呼び出し側が起動前に設定する。スタックは `0x100000` から確保し、結果2語は `0x103ff0` と `0x103ff8` に置く。UART でブートするときは実行ファイルと要求を個別に用意する。
+
+```sh
+elf=selfhost/target/compile/riscv64im-unknown-none-elf/release/ncg2-rv64im-core-selfhost
+python tools/verify_selfhost_qemu.py "$elf" selfhost/target/compile-qemu.log \
+  --profile compile-circuit --request-out selfhost/target/compile-request.bin
+python tools/elf_image.py "$elf" selfhost/target/compile-uart.bin --format uart-boot \
+  --request selfhost/target/compile-request.bin
+```
+
+QEMU の検証器は58バイトの回路ソースを含む要求をメモリに書き、`boot_halt` まで実行する。終了状態1と情報 `0x2b800113` を照合し、同じ要求を UART の転送データへ含められるように保存する。情報の内訳は構文ノード19個、出力1、予約したヒープ11,136バイトである。
+
+Rust 1.99.1 の Windows ホストでビルドした ELF は427,760バイト、SHA-256 は `6353379ef9c97e4984fc2a5feb9f4cbcf0b9362d125ec0641f7ace9929c198f8` だった。QEMU では `0x10000` から `boot_halt` の手前まで50,924命令を実行した。
 
 ## UART ブート用の転送データを作る
 

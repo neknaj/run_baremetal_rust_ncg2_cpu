@@ -11,9 +11,12 @@ import time
 
 
 SOURCE = b"(using nor)\n(func invert (in a) (out b) (def b (nor a a)))"
-EXPECTED_RESULT = (1, 0x07E00113)
-REQUEST_ADDRESS = 0x2BF00
-RESULT_ADDRESS = 0x2FFF0
+REQUEST = struct.pack("<QQ128s", len(SOURCE), 0, SOURCE)
+PROFILES = {
+    # 要求の物理アドレス、結果の物理アドレス、期待する結果2語。
+    "syntax": (0x2BF00, 0x2FFF0, (1, 0x07E00113)),
+    "compile-circuit": (0x51F00, 0x103FF0, (1, 0x2B800113)),
+}
 HALT_ADDRESS = 0x10068
 
 
@@ -47,9 +50,11 @@ def wait_for_debugger(process: subprocess.Popen, port: int) -> socket.socket:
     raise TimeoutError("QEMU のデバッガーに接続できない。")
 
 
-def verify(elf: Path, trace: Path, qemu: str) -> tuple[int, int, int]:
+def verify(
+    elf: Path, trace: Path, qemu: str, profile: str = "syntax"
+) -> tuple[int, int, int]:
     """固定の入力を実行し、照合できた場合だけ参照ログを出力先へ置く。"""
-    request = struct.pack("<QQ128s", len(SOURCE), 0, SOURCE)
+    request_address, result_address, expected = PROFILES[profile]
     trace.parent.mkdir(parents=True, exist_ok=True)
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
@@ -62,7 +67,9 @@ def verify(elf: Path, trace: Path, qemu: str) -> tuple[int, int, int]:
         ])
         try:
             with wait_for_debugger(process, port) as connection, connection.makefile("rb") as reader:
-                reply = exchange(connection, reader, f"M{REQUEST_ADDRESS:x},{len(request):x}:{request.hex()}")
+                # Windows のボリュームへ WSL から PC 列を書くと、停止応答まで10秒を超える。
+                connection.settimeout(120)
+                reply = exchange(connection, reader, f"M{request_address:x},{len(REQUEST):x}:{REQUEST.hex()}")
                 if reply != "OK":
                     raise ValueError(f"入力要求をセットできない。応答 {reply}。")
                 reply = exchange(connection, reader, f"Z0,{HALT_ADDRESS:x},4")
@@ -73,13 +80,13 @@ def verify(elf: Path, trace: Path, qemu: str) -> tuple[int, int, int]:
                 pc = int.from_bytes(bytes.fromhex(registers[512:528]), "little")
                 if pc != HALT_ADDRESS:
                     raise ValueError(f"停止した PC が異なる。PC {pc:#x}。")
-                reply = exchange(connection, reader, f"m{RESULT_ADDRESS:x},10")
+                reply = exchange(connection, reader, f"m{result_address:x},10")
                 status, info = struct.unpack("<QQ", bytes.fromhex(reply))
         finally:
             if process.poll() is None:
                 process.terminate()
             process.wait(timeout=5)
-        if (status, info) != EXPECTED_RESULT:
+        if (status, info) != expected:
             raise ValueError(f"終了結果が異なる。status={status:#x} information={info:#x}。")
         pcs = re.findall(rb"^Trace \d+: 0x[0-9a-f]+ \[[0-9a-f]+/([0-9a-f]+)/", log.read_bytes(), re.M)
         if not pcs or int(pcs[0], 16) != 0x10000:
@@ -94,10 +101,16 @@ def main() -> None:
     parser.add_argument("elf", type=Path)
     parser.add_argument("trace", type=Path)
     parser.add_argument("--qemu", default="qemu-riscv64")
+    parser.add_argument("--profile", choices=PROFILES, default="syntax")
+    parser.add_argument("--request-out", type=Path, help="QEMU へ書いた要求を UART 転送用に保存する。")
     args = parser.parse_args()
-    if args.elf.resolve() == args.trace.resolve():
-        parser.error("ELF と参照ログのパスは別に指定する。")
-    status, info, count = verify(args.elf, args.trace, args.qemu)
+    paths = [path.resolve() for path in (args.elf, args.trace, args.request_out) if path is not None]
+    if len(paths) != len(set(paths)):
+        parser.error("ELF、参照ログ、要求のパスはそれぞれ別に指定する。")
+    status, info, count = verify(args.elf, args.trace, args.qemu, args.profile)
+    if args.request_out is not None:
+        args.request_out.parent.mkdir(parents=True, exist_ok=True)
+        args.request_out.write_bytes(REQUEST)
     print(f"status={status:#x} information={info:#x} 命令数={count}")
 
 
