@@ -22,6 +22,15 @@ struct Storage {
     ram: Option<Vec<bool>>,
 }
 
+impl Storage {
+    fn delay_stage(&self) -> bool {
+        self.ram.is_none()
+            && self.output.len() == 1
+            && self.pins.data.len() == 1
+            && matches!(self.pins.enable, Pin::Constant(true))
+    }
+}
+
 /// Core の展開済み配線で、変化のある素子を再評価する検証用の実行器。
 ///
 /// [`ClockedVm`] と同じ順に外部入力と公開出力のビットを並べる。
@@ -170,6 +179,48 @@ impl EventVm {
         self.evaluated
     }
 
+    /// 内部段に分岐や公開出力がない、常時有効な1ビットラッチ列を探す。
+    ///
+    /// 先頭から末尾の順に状態素子の添字を返す。閉じた環と単独の素子は含めない。
+    pub fn linear_latch_chains(&self) -> Vec<Vec<usize>> {
+        let mut next = vec![None; self.storage.len()];
+        let mut has_previous = vec![false; self.storage.len()];
+        let gate_count = self.nor.gate_count();
+        for (index, stage) in self.storage.iter().enumerate() {
+            if !stage.delay_stage() {
+                continue;
+            }
+            let slot = stage.output.start;
+            let Some(([reader], [])) = self.users.readers(slot) else {
+                continue;
+            };
+            let Some(successor) = reader.checked_sub(gate_count) else {
+                continue;
+            };
+            let Some(device) = self.storage.get(successor) else {
+                continue;
+            };
+            if device.delay_stage() && matches!(device.pins.data[0], Pin::Slot(input) if input == slot) {
+                next[index] = Some(successor);
+                has_previous[successor] = true;
+            }
+        }
+        let mut chains = Vec::new();
+        for (root, successor) in next.iter().enumerate() {
+            if has_previous[root] || successor.is_none() {
+                continue;
+            }
+            let mut chain = vec![root];
+            let mut current = root;
+            while let Some(successor) = next[current] {
+                chain.push(successor);
+                current = successor;
+            }
+            chains.push(chain);
+        }
+        chains
+    }
+
     /// 外部入力を適用し、1 tick 後の公開出力を借りる。
     ///
     /// 外部入力の変更は同じ tick の更新に使う。素子の出力は全候補を評価した後で確定する。
@@ -178,6 +229,21 @@ impl EventVm {
     ///
     /// 外部入力の幅が違う場合は、状態を変更せず `TickInputError::InputCount` を返す。
     pub fn step(&mut self, input: &[bool]) -> Result<&[bool], TickInputError> {
+        self.step_with_evaluation(input, |_| {})
+    }
+
+    /// 1 tick 進め、評価する素子の添字を評価順に通知する。
+    ///
+    /// 添字は NOR を先に並べ、その後に状態素子を並べる。
+    ///
+    /// # Errors
+    ///
+    /// 入力の幅が異なる場合は、状態を変更せず一件も通知しない。
+    pub fn step_with_evaluation(
+        &mut self,
+        input: &[bool],
+        mut evaluate: impl FnMut(usize),
+    ) -> Result<&[bool], TickInputError> {
         if input.len() != self.external {
             return Err(TickInputError::InputCount);
         }
@@ -187,6 +253,7 @@ impl EventVm {
 
         self.evaluated = self.queue.pending_count();
         while let Some(node) = self.queue.pop() {
+            evaluate(node);
             if node < self.nor.gate_count() {
                 let value = self.nor.next(node);
                 let slot = self.augmented + node;

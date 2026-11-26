@@ -6,6 +6,30 @@ use circuitgame2_core::netlist::{
 use ncg2_rv64_arithmetic_proof::event_clocked::EventVm;
 
 #[test]
+fn delay_chains_stop_at_observations_and_exclude_branches_and_cycles() {
+    use Wire::{Constant, Input};
+
+    let network = ClockedNor::check(NorNetlist {
+        input_count: 9,
+        gates: vec![],
+        outputs: vec![Input(2), Input(3), Input(7), Input(8)],
+    })
+    .unwrap();
+    let stages = [0, 1, 2, 5, 4, 0, 6, 6]
+        .into_iter()
+        .map(|input| ClockedStorageInputs {
+            address: None,
+            data: vec![Input(input)],
+            enable: Constant(true),
+        })
+        .collect();
+    let core = ClockedVm::new(network, 1, stages, 8).unwrap();
+    let event = EventVm::new(&core).unwrap();
+
+    assert_eq!(event.linear_latch_chains(), vec![vec![0, 1]]);
+}
+
+#[test]
 fn writes_become_visible_on_the_next_read_first_tick_with_no_input_changes() {
     let network = ClockedNor::check(NorNetlist {
         input_count: 1,

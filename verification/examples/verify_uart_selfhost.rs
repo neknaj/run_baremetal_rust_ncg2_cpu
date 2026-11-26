@@ -1,6 +1,6 @@
 //! Core を含む ELF の転送、実行、QEMU との照合を行う。
 
-use std::{error::Error, fs, path::Path};
+use std::{error::Error, fs, path::Path, time::Instant};
 
 use circuitgame2_core::netlist::ClockedVm;
 use ncg2_rv64_arithmetic_proof::event_clocked::EventVm;
@@ -14,6 +14,7 @@ const STATUS: u64 = 0x103ff0;
 const INFORMATION: u64 = 0x103ff8;
 const MAX_WORDS: usize = 0x8400;
 const STANDARD_TICKS: u64 = 1600;
+const WORD_TICKS: u64 = (8 * 10 * uart::BIT_TICKS) as u64;
 
 struct Machine {
     reference: ClockedVm,
@@ -47,6 +48,14 @@ impl Machine {
     }
 
     fn step(&mut self, rx: bool) -> Result<bool, Box<dyn Error>> {
+        self.step_with_evaluation(rx, |_| {})
+    }
+
+    fn step_with_evaluation(
+        &mut self,
+        rx: bool,
+        evaluate: impl FnMut(usize),
+    ) -> Result<bool, Box<dyn Error>> {
         if self.tick >= self.limit {
             return Err(format!(
                 "上限 {} tick までに終了しなかった。PC={:#x}",
@@ -59,7 +68,7 @@ impl Machine {
         self.frame[0] = rx;
         let output = self
             .event
-            .step(&self.frame)
+            .step_with_evaluation(&self.frame, evaluate)
             .map_err(|error| format!("tick {}: {error:?}", self.tick))?;
         if self.tick <= STANDARD_TICKS
             && self
@@ -165,7 +174,51 @@ fn reference_pcs(path: &Path) -> Result<Vec<u64>, Box<dyn Error>> {
     Ok(pcs)
 }
 
-fn flash(machine: &mut Machine, words: &[[u8; 8]]) -> Result<(), Box<dyn Error>> {
+#[derive(Default)]
+struct PhaseMetrics {
+    ticks: u64,
+    evaluations: u64,
+    chain_evaluations: u64,
+    ticks_without_other_evaluations: u64,
+    commit_ticks: u64,
+    write_ticks: u64,
+}
+
+impl PhaseMetrics {
+    fn record(&mut self, evaluations: u64, chain_evaluations: u64, commit: bool, write: bool) {
+        self.ticks += 1;
+        self.evaluations += evaluations;
+        self.chain_evaluations += chain_evaluations;
+        self.ticks_without_other_evaluations += u64::from(evaluations == chain_evaluations);
+        self.commit_ticks += u64::from(commit);
+        self.write_ticks += u64::from(write);
+    }
+
+    fn report(&self, name: &str) {
+        println!(
+            "{name} {} tick、{} 素子評価、遅延鎖内 {} 評価、遅延鎖外の評価がない tick {}、退役信号 {} tick、書き込み有効 {} tick",
+            self.ticks,
+            self.evaluations,
+            self.chain_evaluations,
+            self.ticks_without_other_evaluations,
+            self.commit_ticks,
+            self.write_ticks,
+        );
+    }
+}
+
+#[derive(Default)]
+struct TransferMetrics {
+    chain_nodes: Vec<bool>,
+    waveform: PhaseMetrics,
+    ack: PhaseMetrics,
+}
+
+fn flash(
+    machine: &mut Machine,
+    words: &[[u8; 8]],
+    mut metrics: Option<&mut TransferMetrics>,
+) -> Result<(), Box<dyn Error>> {
     let program = machine.storage_index(15)?;
     let tail = machine.storage_index(10)?;
     let check = |machine: &Machine, offset: usize, bytes: [u8; 8]| -> Result<(), Box<dyn Error>> {
@@ -186,8 +239,30 @@ fn flash(machine: &mut Machine, words: &[[u8; 8]]) -> Result<(), Box<dyn Error>>
         machine.step(true)?;
     }
     for (index, &bytes) in words.iter().enumerate() {
+        let start = machine.tick;
         let acknowledged = uart::send(bytes, |rx| -> Result<bool, Box<dyn Error>> {
-            let ready = machine.step(rx)?;
+            let ready = match metrics.as_deref_mut() {
+                Some(metrics) => {
+                    let mut chain_evaluations = 0;
+                    let ready = machine.step_with_evaluation(rx, |node| {
+                        chain_evaluations += u64::from(metrics.chain_nodes[node]);
+                    })?;
+                    let phase = if machine.tick - start <= WORD_TICKS {
+                        &mut metrics.waveform
+                    } else {
+                        &mut metrics.ack
+                    };
+                    let output = machine.event.output();
+                    phase.record(
+                        machine.event.evaluated_last_tick() as u64,
+                        chain_evaluations,
+                        output[194],
+                        output[196],
+                    );
+                    ready
+                }
+                None => machine.step(rx)?,
+            };
             if machine.event.output()[194] && machine.pc() >= ENTRY {
                 return Err("転送中にアプリの命令が退役した。".into());
             }
@@ -220,9 +295,48 @@ fn flash(machine: &mut Machine, words: &[[u8; 8]]) -> Result<(), Box<dyn Error>>
         check(machine, offset, bytes)?;
     }
     println!(
-        "転送完了、tick {}、全{}語一致",
+        "転送・照合した区間の最終 tick {}、{}語一致",
         machine.tick,
         words.len() - 1
+    );
+    Ok(())
+}
+
+fn measure_transfer(project: &Path, image: &Path, count: usize) -> Result<(), Box<dyn Error>> {
+    let image = fs::read(image)?;
+    let words = image_words(&image)?;
+    if count == 0 || count >= words.len() {
+        return Err("計測するペイロード語数が転送データの範囲外。".into());
+    }
+    let setup = Instant::now();
+    let mut machine = Machine::new(uart::machine(project)?, u64::MAX)?;
+    let setup_elapsed = setup.elapsed();
+    let chains = machine.event.linear_latch_chains();
+    let stages: usize = chains.iter().map(Vec::len).sum();
+    let longest = chains.iter().map(Vec::len).max().unwrap_or(0);
+    let gate_count = machine.reference.nor_gate_count();
+    let mut chain_nodes = vec![false; machine.event.node_count()];
+    for stage in chains.iter().flatten().copied() {
+        chain_nodes[gate_count + stage] = true;
+    }
+    let mut metrics = TransferMetrics {
+        chain_nodes,
+        ..TransferMetrics::default()
+    };
+    let started = Instant::now();
+    // ヘッダーには元の全語数を残し、最初の count 語の ACK と RAM を同じ経路で調べる。
+    flash(&mut machine, &words[..=count], Some(&mut metrics))?;
+    let elapsed = started.elapsed();
+    println!(
+        "転送先頭 {count} 語、構築 {:.3}s、転送・照合 {:.3}s",
+        setup_elapsed.as_secs_f64(),
+        elapsed.as_secs_f64(),
+    );
+    metrics.waveform.report("UART 波形");
+    metrics.ack.report("ACK 待ち");
+    println!(
+        "縮約候補の遅延鎖 {} 本、ラッチ {stages} 個、最長 {longest} 段",
+        chains.len(),
     );
     Ok(())
 }
@@ -282,6 +396,15 @@ fn verify_execution(
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if let [project, image, flag, count] = args.as_slice()
+        && flag == "--measure-transfer"
+    {
+        let count = count
+            .to_str()
+            .ok_or("計測する語数は十進整数で指定する。")?
+            .parse()?;
+        return measure_transfer(Path::new(project), Path::new(image), count);
+    }
     let (project, image, log, expected, limit) = match args.as_slice() {
         [project, image, log, info, limit] => {
             let info = u64::from_str_radix(
@@ -307,6 +430,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let words = image_words(&image)?;
     let reference = reference_pcs(Path::new(log))?;
     let mut machine = Machine::new(uart::machine(Path::new(project))?, limit)?;
-    flash(&mut machine, words)?;
+    flash(&mut machine, words, None)?;
     verify_execution(&mut machine, &reference, expected)
 }
