@@ -18,6 +18,55 @@ pub open spec fn multiply_control(
     &&& forall|t: int| #[trigger] finished(t) ==> done(t - 5) && !done(t - 6)
 }
 
+/// 実配線から求めた起動時の遷移式をもとに、取り込みと完了の時刻条件を導く。
+pub proof fn multiply_control_from_reset_wiring(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    repeat: spec_fn(int) -> bool,
+    not_done: spec_fn(int) -> bool,
+    not_yet: spec_fn(int) -> bool,
+    rising: spec_fn(int) -> bool,
+)
+    requires
+        forall|t: int| #[trigger] capture(t) == (t >= 3 && (start(t - 3) || repeat(t - 3))),
+        forall|t: int| #[trigger] repeat(t) == (t >= 5 && capture(t - 515) && not_yet(t - 3)),
+        forall|t: int| t >= 1 ==> #[trigger] not_done(t) == !done(t - 1),
+        forall|t: int| t >= 2 ==> #[trigger] not_yet(t) == (running(t - 2) && not_done(t - 2)),
+        forall|t: int| t >= 2 ==> #[trigger] rising(t) == (done(t - 2) && !done(t - 3)),
+        forall|t: int| #[trigger] finished(t) == (t >= 5 && rising(t - 3) && running(t - 3)),
+        forall|t: int| t <= 0 ==> !(#[trigger] done(t)),
+        forall|t: int| t >= 0 && !(#[trigger] capture(t)) ==> #[trigger] done(t + 1) == done(t),
+    ensures
+        multiply_control(start, capture, done, finished),
+        forall|t: int| t <= 0 ==> !(#[trigger] capture(t)),
+{
+    assert forall|t: int| #[trigger] capture(t) implies start(t - 3)
+        || (capture(t - 518) && !done(t - 9)) by {
+        if !start(t - 3) {
+            assert(repeat(t - 3));
+            assert(t - 3 >= 5);
+            assert(capture(t - 518));
+            // 最初の取り込みから512段以上を経るため、反転ゲートの初期値は反復に届かない。
+            assert(t - 518 >= 3);
+            assert(t - 8 >= 1);
+            assert(not_yet(t - 6));
+            assert(not_done(t - 8));
+        }
+    }
+    assert forall|t: int| #[trigger] done(t + 1) != done(t) implies capture(t) by {
+        if t < 0 {
+            assert(!done(t + 1) && !done(t));
+        }
+    }
+    assert forall|t: int| #[trigger] finished(t) implies done(t - 5) && !done(t - 6) by {
+        assert(t >= 5);
+        assert(rising(t - 3));
+    }
+}
+
 /// 最初の取り込みから round 回分だけ進んだ時刻を表す。
 pub open spec fn round_at(first: int, tick: int, round: int) -> bool {
     round >= 0 && tick == first + 518 * round
