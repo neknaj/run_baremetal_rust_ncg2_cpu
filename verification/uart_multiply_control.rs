@@ -18,6 +18,20 @@ pub open spec fn multiply_control(
     &&& forall|t: int| #[trigger] finished(t) ==> done(t - 5) && !done(t - 6)
 }
 
+/// 開始・反復による取り込みと、実行中の完了通知の等式を表す。
+pub open spec fn multiply_pulse_timing(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+) -> bool {
+    &&& forall|t: int| #[trigger] capture(t) == (t >= 3 && (start(t - 3)
+        || (capture(t - 518) && running(t - 8) && !done(t - 9))))
+    &&& forall|t: int| #[trigger] finished(t) == (t >= 5
+        && done(t - 5) && !done(t - 6) && running(t - 3))
+}
+
 /// 実配線から求めた起動時の遷移式をもとに、取り込みと完了の時刻条件を導く。
 pub proof fn multiply_control_from_reset_wiring(
     start: spec_fn(int) -> bool,
@@ -41,21 +55,27 @@ pub proof fn multiply_control_from_reset_wiring(
         forall|t: int| t >= 0 && !(#[trigger] capture(t)) ==> #[trigger] done(t + 1) == done(t),
     ensures
         multiply_control(start, capture, done, finished),
+        multiply_pulse_timing(start, capture, done, finished, running),
         forall|t: int| t <= 0 ==> !(#[trigger] capture(t)),
 {
-    assert forall|t: int| #[trigger] capture(t) implies start(t - 3)
-        || (capture(t - 518) && !done(t - 9)) by {
-        if !start(t - 3) {
-            assert(repeat(t - 3));
-            assert(t - 3 >= 5);
+    assert forall|t: int| #[trigger] capture(t) == (t >= 3 && (start(t - 3)
+        || (capture(t - 518) && running(t - 8) && !done(t - 9)))) by {
+        if repeat(t - 3) || capture(t - 518) {
             assert(capture(t - 518));
-            // 最初の取り込みから512段以上を経るため、反転ゲートの初期値は反復に届かない。
+            // 反復は取り込みから512段以上を経るため、反転ゲートの初期値は届かない。
             assert(t - 518 >= 3);
-            assert(t - 8 >= 1);
-            assert(not_yet(t - 6));
-            assert(not_done(t - 8));
+            assert(not_yet(t - 6) == (running(t - 8) && not_done(t - 8)));
+            assert(not_done(t - 8) == !done(t - 9));
         }
     }
+    assert forall|t: int| #[trigger] finished(t) == (t >= 5
+        && done(t - 5) && !done(t - 6) && running(t - 3)) by {
+        if t >= 5 {
+            assert(rising(t - 3) == (done(t - 5) && !done(t - 6)));
+        }
+    }
+    assert forall|t: int| #[trigger] capture(t) implies start(t - 3)
+        || (capture(t - 518) && !done(t - 9)) by {};
     assert forall|t: int| #[trigger] done(t + 1) != done(t) implies capture(t) by {
         if t < 0 {
             assert(!done(t + 1) && !done(t));
@@ -65,6 +85,66 @@ pub proof fn multiply_control_from_reset_wiring(
         assert(t >= 5);
         assert(rising(t - 3));
     }
+}
+
+/// 開始から11 tick で running が立ち、完了から3 tick までの遅延を含む。
+pub open spec fn multiply_running_timing(
+    start: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+) -> bool {
+    forall|t: int| t >= 11 ==> #[trigger] running(t) == if start(t - 11) || finished(t - 3) {
+        start(t - 11)
+    } else {
+        running(t - 1)
+    }
+}
+
+/// 開始が有効になってから、完了通知が running に届くまでは実行中のままになる。
+pub proof fn multiply_runs_until_finish_reaches_latch(
+    start: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    first_start: int,
+    until: int,
+)
+    requires
+        multiply_running_timing(start, finished, running),
+        0 <= first_start,
+        first_start + 11 <= until,
+        start(first_start),
+        forall|t: int| first_start + 11 < t <= until ==> !(#[trigger] finished(t - 3)),
+    ensures running(until),
+    decreases until - first_start - 11,
+{
+    if first_start + 11 < until {
+        multiply_runs_until_finish_reaches_latch(start, finished, running, first_start, until - 1);
+        assert(!finished(until - 3));
+    }
+}
+
+/// 初期化後に走り続け、次回要求の判定時点で未完了なら反復が必ず発生する。
+pub proof fn unfinished_capture_causes_next_round(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    running: spec_fn(int) -> bool,
+    first_start: int,
+    captured: int,
+)
+    requires
+        multiply_pulse_timing(start, capture, done, finished, running),
+        multiply_running_timing(start, finished, running),
+        0 <= first_start,
+        first_start + 3 <= captured,
+        start(first_start),
+        capture(captured),
+        !done(captured + 509),
+        forall|t: int| first_start + 8 < t <= captured + 507 ==> !(#[trigger] finished(t)),
+    ensures capture(captured + 518),
+{
+    multiply_runs_until_finish_reaches_latch(start, finished, running, first_start, captured + 510);
 }
 
 /// 最初の取り込みから round 回分だけ進んだ時刻を表す。
