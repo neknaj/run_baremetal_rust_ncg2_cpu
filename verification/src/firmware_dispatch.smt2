@@ -52,6 +52,17 @@
 (define-fun mulhu () Bool (and (= op #b0110011) (= funct7 #b0000001) (= funct3 #b011)))
 (define-fun mul () Bool
   (and (= op #b0110011) (= funct7 #b0000001) (or (= funct3 #b000) (= funct3 #b011))))
+; M 拡張の DIV[U]・REM[U] と、OP-32 の対応する W 命令を認識する。
+(define-fun divide-expected () Bool
+  (and (or (= op #b0110011) (= op #b0111011))
+       (= funct7 #b0000001)
+       (or (= funct3 #b100) (= funct3 #b101) (= funct3 #b110) (= funct3 #b111))))
+(define-fun signed-mode-expected () Bool
+  (and divide-expected (or (= funct3 #b100) (= funct3 #b110))))
+(define-fun word-mode-expected () Bool
+  (and divide-expected (= op #b0111011)))
+(define-fun remainder-mode-expected () Bool
+  (and divide-expected (or (= funct3 #b110) (= funct3 #b111))))
 (define-fun add () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b000)))
 (define-fun addiw () Bool (and (= op #b0011011) (= funct3 #b000)))
 (define-fun sub () Bool (and (= op #b0110011) (= funct7 #b0100000) (= funct3 #b000)))
@@ -139,7 +150,7 @@
 (define-fun jump-ok () Bool
   (or (not jump) (= (bvurem jump-offset (_ bv4 64)) (_ bv0 64))))
 (define-fun supports-register-write () Bool
-  (or addi slli lui auipc jal jalr load-ok op-xor sltu mul extended-alu))
+  (or addi slli lui auipc jal jalr load-ok op-xor sltu mul divide-expected extended-alu))
 (define-fun supported () Bool (or supports-register-write branch store-ok))
 (define-fun valid-expected () Bool (and fetch-valid supported jump-ok))
 (define-fun register-write-expected () Bool (and valid-expected supports-register-write))
@@ -151,6 +162,10 @@
 (assert (or (distinct valid valid-expected)
             (distinct multiply mul)
             (distinct high-product mulhu)
+            (distinct divide divide-expected)
+            (distinct signed-mode signed-mode-expected)
+            (distinct word-mode word-mode-expected)
+            (distinct remainder-mode remainder-mode-expected)
             (distinct next-pc next-pc-expected)
             (distinct destination ((_ extract 11 7) instruction))
             (distinct register-write register-write-expected)
@@ -189,4 +204,4 @@
                        (ite (bvult rs1 immediate-i) (_ bv1 64) (_ bv0 64))))
                      (and srli (distinct register-data (bvlshr rs1 immediate-shift)))
                      (and srai (distinct register-data (bvashr rs1 immediate-shift)))
-                     (and mul (distinct register-data product))))))
+                     (and (or mul divide-expected) (distinct register-data long-result))))))
