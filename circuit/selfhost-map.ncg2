@@ -1,0 +1,42 @@
+(namespace rv64
+  (export selfhost-data-map)
+
+  (func in-address-range
+    (in (address (bits 64)) (first (bits 64)) (end (bits 64)))
+    (out contained)
+    (def before-first (::rv64::arithmetic::less-than-unsigned address first))
+    (def before-end (::rv64::arithmetic::less-than-unsigned address end))
+    (def at-or-after-end (nor before-end before-end))
+    (def contained (nor before-first at-or-after-end)))
+
+  ;; 32 KiB の ROM の添字幅と読み出せる物理区間を分け、0x16000 以降を BSS に割り当てる。
+  ;; 受け付けるのは8バイト境界の語。各添字は対応するバンクの選択ビットが1の場合に使う。
+  (func selfhost-data-map
+    (in (address (bits 64)))
+    (out rom bss mailbox stack (rom-word (bits 12)) (bss-word (bits 11))
+         (mailbox-word (bits 5)) (stack-word (bits 11)))
+    (def code-first #x0000000000010000)
+    (def bss-first #x0000000000016000)
+    (def bss-end #x0000000000019000)
+    (def mailbox-first #x000000000002bf00)
+    (def stack-first #x000000000002c000)
+    (def stack-end #x0000000000030000)
+    (def low (slice address 0 3))
+    (def aligned (execute-zero-3 low))
+    (def in-rom (in-address-range address code-first bss-first))
+    (def in-bss (in-address-range address bss-first bss-end))
+    (def in-mailbox (in-address-range address mailbox-first stack-first))
+    (def in-stack (in-address-range address stack-first stack-end))
+    (def rom (execute-and aligned in-rom))
+    (def bss (execute-and aligned in-bss))
+    (def mailbox (execute-and aligned in-mailbox))
+    (def stack (execute-and aligned in-stack))
+
+    (def rom-word (slice address 3 12))
+    ;; BSS の開始位置は16 KiBの区画の中点。ビット13を反転して語0に対応させる。
+    (def bss-index-low (slice address 3 10))
+    (def bss-index-high (bit address 13))
+    (def bss-index-top (nor bss-index-high bss-index-high))
+    (def bss-word (concat bss-index-low bss-index-top))
+    (def mailbox-word (slice address 3 5))
+    (def stack-word (slice address 3 11))))

@@ -110,18 +110,35 @@ pub(super) fn emit_rom(selected: &str, outputs: &[Wire], image: &[u8]) -> Result
 
 /// 選択ビットと各有効区間の語添字を、絶対アドレスから求めた値と比較する。
 pub(super) fn emit_data_map(outputs: &[Wire]) {
+    emit_banks(
+        outputs,
+        &[
+            (0x10000, 0x10100, 5, 3),
+            (0x11000, 0x12000, 9, 8),
+            (0x2c000, 0x30000, 11, 17),
+        ],
+    );
+}
+
+/// セルフホスト用の4区間をすべての絶対アドレスで照合する。
+pub(super) fn emit_selfhost_data_map(outputs: &[Wire]) {
+    emit_banks(
+        outputs,
+        &[
+            (0x10000, 0x16000, 12, 4),
+            (0x16000, 0x19000, 11, 16),
+            (0x2bf00, 0x2c000, 5, 27),
+            (0x2c000, 0x30000, 11, 32),
+        ],
+    );
+}
+
+fn emit_banks(outputs: &[Wire], banks: &[(u64, u64, usize, usize)]) {
     let address = vector((0..64).map(|i| format!("i{i}")));
     println!("(define-fun address () (_ BitVec 64) {address})");
     println!("(define-fun aligned () Bool (= (bvurem address (_ bv8 64)) (_ bv0 64)))");
     let mut differences = Vec::new();
-    for (bank, (start, stop, word_bits, out_first)) in [
-        (0x10000, 0x10100, 5, 3),
-        (0x11000, 0x12000, 9, 8),
-        (0x2c000, 0x30000, 11, 17),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (bank, &(start, stop, word_bits, out_first)) in banks.iter().enumerate() {
         println!(
             "(define-fun bank-{bank} () Bool (and aligned (bvuge address (_ bv{start} 64)) (bvult address (_ bv{stop} 64))))"
         );

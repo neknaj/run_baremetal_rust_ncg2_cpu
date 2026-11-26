@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         selected @ ("add" | "shift-left" | "boot-ram-address" | "execute-boot" | "firmware-rom"
         | "firmware-fetch" | "firmware-data-map" | "execute-control" | "xor"
         | "compare-unsigned" | "less-than-unsigned" | "execute-load" | "execute-logic"
-        | "mul-round" | "firmware-dispatch"),
+        | "mul-round" | "firmware-dispatch" | "selfhost-data-map"),
     ) = args.get(1).map(String::as_str)
     else {
         return Err("検証対象の NCG2 関数名を指定する。対象は README と各設計文書を参照。".into());
@@ -90,6 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "execute-logic.ncg2",
             "subword-memory.ncg2",
             "execute-subword.ncg2",
+            "execute-alu.ncg2",
             "firmware-dispatch.ncg2",
         ],
         "execute-load" => &[
@@ -103,6 +104,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "execute-load.ncg2",
         ],
         "firmware-rom" => &["decode.ncg2", "arithmetic.ncg2", "firmware-rom.ncg2"],
+        "selfhost-data-map" => &[
+            "decode.ncg2",
+            "arithmetic.ncg2",
+            "execute-boot.ncg2",
+            "selfhost-map.ncg2",
+        ],
         "firmware-fetch" | "firmware-data-map" => &[
             "decode.ncg2",
             "arithmetic.ncg2",
@@ -167,6 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
         "firmware-data-map" => (64, 28),
+        "selfhost-data-map" => (64, 43),
         _ => unreachable!(),
     };
     assert_eq!((*input_count, outputs.len()), expected_shape);
@@ -224,6 +232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firmware::emit_rom(selected, outputs, &std::fs::read(path)?)?;
     } else if selected == "firmware-data-map" {
         firmware::emit_data_map(outputs);
+    } else if selected == "selfhost-data-map" {
+        firmware::emit_selfhost_data_map(outputs);
     } else if selected == "mul-round" {
         multiply::emit(outputs);
     } else if selected == "firmware-dispatch" {

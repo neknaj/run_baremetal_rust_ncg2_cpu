@@ -51,6 +51,22 @@ class ElfError(ValueError):
 
 
 @dataclass(frozen=True)
+class RomLayout:
+    """ROM の添字幅、読み出し区間の上端、ゼロ初期化 RAM の区間を持つ。"""
+
+    address_bits: int
+    rom_end: int
+    writable_banks: tuple[tuple[int, int], ...]
+
+
+ROM_LAYOUTS = {
+    "boot": RomLayout(ROM_ADDRESS_BITS, ROM_END, WRITABLE_BANKS),
+    # 32 KiB分の ROM を構成するが、0x16000 からは RAM を参照する。
+    "core": RomLayout(12, 0x16000, ((0x16000, 0x19000), (0x2BF00, RAM_END))),
+}
+
+
+@dataclass(frozen=True)
 class Segment:
     """PT_LOAD が RAM に占める範囲と、初期値を供給するファイル上の位置。"""
 
@@ -117,19 +133,19 @@ def load_segments(elf: bytes) -> tuple[Segment, ...]:
     return tuple(segments)
 
 
-def memory_image(elf: bytes, *, for_rom: bool = False) -> bytes:
-    """128 KiBのイメージを作る。for_rom では各領域を回路のバンクに限定する。"""
+def memory_image(elf: bytes, *, layout: RomLayout | None = None) -> bytes:
+    """128 KiBのイメージを作る。layout を指定した場合は各領域を対応するバンクに限定する。"""
     segments = load_segments(elf)
     image = bytearray(RAM_SIZE)
     for segment in segments:
-        if for_rom:
+        if layout is not None:
             end = segment.address + segment.size
             if segment.writable:
                 fits = (not segment.executable and segment.file_size == 0
                         and any(base <= segment.address < end <= limit
-                                for base, limit in WRITABLE_BANKS))
+                                for base, limit in layout.writable_banks))
             else:
-                fits = RAM_BASE <= segment.address < end <= ROM_END
+                fits = RAM_BASE <= segment.address < end <= layout.rom_end
             if not fits:
                 raise ElfError(ErrorKind.SEGMENT, "ロード領域が起動 ROM またはゼロ初期化 RAM に収まらない。",
                                segment.header_index)
@@ -255,12 +271,21 @@ def main() -> int:
         "ncg2-rom": ncg2_rom_source,
     }
     parser.add_argument("--format", choices=encoders, default="image")
+    parser.add_argument("--rom-layout", choices=ROM_LAYOUTS, help="ncg2-rom の物理アドレス配置。既定は boot。")
     args = parser.parse_args()
     if args.elf.resolve() == args.output.resolve():
         parser.error("出力先を入力 ELF と同じファイルにできない。")
+    if args.rom_layout is not None and args.format != "ncg2-rom":
+        parser.error("--rom-layout は --format ncg2-rom とともに指定する。")
     try:
-        image = memory_image(args.elf.read_bytes(), for_rom=args.format == "ncg2-rom")
-        write_output(args.output, encoders[args.format](image))
+        elf = args.elf.read_bytes()
+        if args.format == "ncg2-rom":
+            layout = ROM_LAYOUTS[args.rom_layout or "boot"]
+            image = memory_image(elf, layout=layout)
+            data = ncg2_rom_source(image, address_bits=layout.address_bits)
+        else:
+            data = encoders[args.format](memory_image(elf))
+        write_output(args.output, data)
     except ElfError as error:
         location = "" if error.header_index is None else f" PT[{error.header_index}]"
         print(f"{error.kind.value}{location} {error}", file=sys.stderr)

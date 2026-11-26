@@ -21,6 +21,7 @@ fn machine(rom_override: Option<&str>) -> ClockedVm {
         "firmware-memory",
         "execute-load",
         "execute-logic",
+        "execute-alu",
         "multiply",
         "subword-memory",
         "execute-subword",
@@ -158,8 +159,8 @@ fn runs_the_rust_elf_to_its_halt_loop() {
 }
 
 #[test]
-fn partial_stores_preserve_unaddressed_bytes_through_the_cpu() {
-    let instructions: [u32; 12] = [
+fn partial_stores_and_extended_alu_retire_through_the_cpu() {
+    let instructions: [u32; 16] = [
         0x0001_10b7, // lui x1,0x11
         0x0001_0137, // lui x2,0x10
         0x0601_3183, // ld x3,0x60(x2)
@@ -171,6 +172,10 @@ fn partial_stores_preserve_unaddressed_bytes_through_the_cpu() {
         0x0040_9123, // sh x4,2(x1)
         0x0050_a223, // sw x5,4(x1)
         0x0000_b303, // ld x6,0(x1)
+        0x43f2_5393, // srai x7,x4,63
+        0x0053_8433, // add x8,x7,x5
+        0xfff2_c493, // xori x9,x5,-1
+        0x0080_b423, // sd x8,8(x1)
         0x0040_90a3, // sh x4,1(x1)
     ];
     let mut words = [0; 32];
@@ -183,7 +188,7 @@ fn partial_stores_preserve_unaddressed_bytes_through_the_cpu() {
     let input = bits(0x11000);
     let mut committed = Vec::new();
     let mut stopped = false;
-    for _ in 0..13_000 {
+    for _ in 0..17_000 {
         let output = vm.step(&input).unwrap();
         let pc = word(&output[..64]);
         if output[258] {
@@ -196,11 +201,18 @@ fn partial_stores_preserve_unaddressed_bytes_through_the_cpu() {
                 0x18 => assert_eq!(word(&output[192..256]), (-125i64) as u64),
                 0x1c => assert_eq!(word(&output[192..256]), 0x83),
                 0x28 => assert_eq!(word(&output[192..256]), 0x0000_0083_ff83_8318),
+                0x2c => assert_eq!(word(&output[192..256]), u64::MAX),
+                0x30 => assert_eq!(word(&output[192..256]), 0x82),
+                0x34 => assert_eq!(word(&output[192..256]), !0x83),
+                0x38 => {
+                    assert!(output[257]);
+                    assert_eq!(word(&output[128..192]), 0x11008);
+                }
                 _ => {}
             }
         }
         if output[259] {
-            assert_eq!(pc, 0x2c);
+            assert_eq!(pc, 0x3c);
             stopped = true;
         }
         if stopped {
@@ -208,7 +220,7 @@ fn partial_stores_preserve_unaddressed_bytes_through_the_cpu() {
         }
     }
     assert!(stopped);
-    assert_eq!(committed, (0..0x2c).step_by(4).collect::<Vec<_>>());
+    assert_eq!(committed, (0..0x3c).step_by(4).collect::<Vec<_>>());
     assert_eq!(
         word(&vm.step(&input).unwrap()[64..128]),
         0x0000_0083_ff83_8318

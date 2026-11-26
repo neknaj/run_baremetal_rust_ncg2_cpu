@@ -41,6 +41,21 @@
 (define-fun op-xor () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b100)))
 (define-fun sltu () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b011)))
 (define-fun mul () Bool (and (= op #b0110011) (= funct7 #b0000001) (= funct3 #b000)))
+(define-fun add () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b000)))
+(define-fun sub () Bool (and (= op #b0110011) (= funct7 #b0100000) (= funct3 #b000)))
+(define-fun and-register () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b111)))
+(define-fun or-register () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b110)))
+(define-fun srl () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b101)))
+(define-fun andi () Bool (and (= op #b0010011) (= funct3 #b111)))
+(define-fun xori () Bool (and (= op #b0010011) (= funct3 #b100)))
+(define-fun sltiu () Bool (and (= op #b0010011) (= funct3 #b011)))
+(define-fun srli () Bool (and (= op #b0010011) (= funct3 #b101)
+                           (= ((_ extract 31 26) instruction) #b000000)))
+(define-fun srai () Bool (and (= op #b0010011) (= funct3 #b101)
+                           (= ((_ extract 31 26) instruction) #b010000)))
+(define-fun extended-alu () Bool (or add sub and-register or-register srl andi xori sltiu srli srai))
+(define-fun immediate-shift () (_ BitVec 64) ((_ zero_extend 58) ((_ extract 25 20) instruction)))
+(define-fun register-shift () (_ BitVec 64) ((_ zero_extend 58) ((_ extract 5 0) rs2)))
 
 (define-fun in-range ((at (_ BitVec 64)) (first (_ BitVec 64)) (end (_ BitVec 64))) Bool
   (and (bvuge at first) (bvult at end)))
@@ -93,7 +108,7 @@
 (define-fun jump-ok () Bool
   (or (not jump) (= (bvurem jump-offset (_ bv4 64)) (_ bv0 64))))
 (define-fun supports-register-write () Bool
-  (or addi slli lui auipc jal jalr load-ok op-xor sltu mul))
+  (or addi slli lui auipc jal jalr load-ok op-xor sltu mul extended-alu))
 (define-fun supported () Bool (or supports-register-write branch store-ok))
 (define-fun valid-expected () Bool (and fetch-valid supported jump-ok))
 (define-fun register-write-expected () Bool (and valid-expected supports-register-write))
@@ -124,4 +139,15 @@
                      (and op-xor (distinct register-data (bvxor rs1 rs2)))
                      (and sltu (distinct register-data
                        (ite (bvult rs1 rs2) (_ bv1 64) (_ bv0 64))))
+                     (and add (distinct register-data (bvadd rs1 rs2)))
+                     (and sub (distinct register-data (bvsub rs1 rs2)))
+                     (and and-register (distinct register-data (bvand rs1 rs2)))
+                     (and or-register (distinct register-data (bvor rs1 rs2)))
+                     (and srl (distinct register-data (bvlshr rs1 register-shift)))
+                     (and andi (distinct register-data (bvand rs1 immediate-i)))
+                     (and xori (distinct register-data (bvxor rs1 immediate-i)))
+                     (and sltiu (distinct register-data
+                       (ite (bvult rs1 immediate-i) (_ bv1 64) (_ bv0 64))))
+                     (and srli (distinct register-data (bvlshr rs1 immediate-shift)))
+                     (and srai (distinct register-data (bvashr rs1 immediate-shift)))
                      (and mul (distinct register-data product))))))

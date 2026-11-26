@@ -1,6 +1,6 @@
 # Rust 起動プログラムの実行
 
-`::rv64::firmware-machine` は起動 ELF を格納した ROM をフェッチし、レジスタとデータメモリを更新する。起動プログラムが使う ADDI、SLLI、LUI、SD、JAL、AUIPC、BEQ、BNE、BGEU、JALR、LD、XOR、SLTU、MUL に加え、LB、LBU、SB、SH、SW を扱う。リセット時に起動アドレス `0x10000` から実行を始める。
+`::rv64::firmware-machine` は起動 ELF を格納した ROM をフェッチし、レジスタとデータメモリを更新する。リセット時に起動アドレス `0x10000` から実行を始める。起動プログラムの命令と、セルフホスト用 ELF に必要な追加の算術・メモリ命令を扱う。[起動用命令](boot-execution.md) · [分岐と PC 相対命令](control-execution.md) · [整数 ALU](integer-alu.md) · [部分書き込み](subword-memory.md)
 
 ## 命令の完了と書き込み
 

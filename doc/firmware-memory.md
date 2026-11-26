@@ -14,6 +14,19 @@
 
 ROM の生成では各出力ビットを選択回路に分解する。2つの候補が同じ信号なら選択を省き、同じ入力を持つ NOR は出力ビットをまたいで共有する。同梱 ELF の命令フェッチでは展開後の NOR が14,463個から1,450個に減った。
 
+## セルフホスト用の物理アドレス
+
+Core を組み込んだ RV64IM ELF 用の `selfhost-data-map` は以下の4区間を扱う。ROM は4,096語分の添字を持ち、読み取れるアドレスの終点は BSS の開始位置に合わせる。
+
+| 開始 | 終点 | 内容 |
+| --- | --- | --- |
+| `0x10000` | `0x16000` | 命令と読み取り専用データ |
+| `0x16000` | `0x19000` | BSS とヒープ |
+| `0x2bf00` | `0x2c000` | 入力要求 |
+| `0x2c000` | `0x30000` | スタックと結果 |
+
+セルフホスト用 ELF からは `python tools/elf_image.py <ELF> <出力.ncg2> --format ncg2-rom --rom-layout core` で ROM を生成する。生成器はロード領域をこの配置と照合する。Core の厳格 S 式解析と NOR 評価を含む ELF から生成し、実ネットリストの全4,096語を照合した。セルフホスト用の ROM および RAM と CPU をつなぐ作業は進行中である。
+
 ## RAM の更新と読み出し
 
 `firmware-data-memory` は各 tick のアドレス、データ、許可を1件の書き込み要求として受け取る。tick `t` の要求が書き込み可能な語を指すとき、その語を `t + 15` に更新する。ROM、未配置、非整列への書き込み要求で RAM は変わらない。連続した tick に異なるバンクや添字を指定できる。
@@ -30,7 +43,7 @@ host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
 mkdir -p target/verification
 image=target/verification/firmware.bin
 python tools/elf_image.py target/riscv64im-unknown-none-elf/release/ncg2-rv64-boot "$image"
-for circuit in firmware-rom firmware-fetch firmware-data-map; do
+for circuit in firmware-rom firmware-fetch firmware-data-map selfhost-data-map; do
   model="target/verification/$circuit.smt2"
   cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
     --target "$host" --target-dir target/verification -- "$circuit" "$image" > "$model"

@@ -4,7 +4,7 @@ import re
 import struct
 import unittest
 
-from elf_image import ErrorKind, ElfError, memory_image, ncg2_rom_source, ncg2m_source, word_bits
+from elf_image import ROM_LAYOUTS, ErrorKind, ElfError, memory_image, ncg2_rom_source, ncg2m_source, word_bits
 
 
 BASE = 0x10000
@@ -83,7 +83,7 @@ class LoaderTests(unittest.TestCase):
         code = (1, 5, 0x200, BASE, BASE, 8, 8, 1)
         bss = (1, 6, 0x208, 0x11000, 0x11000, 0, 8, 1)
         stack = (1, 6, 0x208, 0x2C000, 0x2C000, 0, 0x4000, 1)
-        image = memory_image(executable([code, bss, stack], bytes(range(8))), for_rom=True)
+        image = memory_image(executable([code, bss, stack], bytes(range(8))), layout=ROM_LAYOUTS["boot"])
         self.assertEqual(image[:16], bytes(range(8)) + bytes(8))
         rom = ncg2_rom_source(image)
         self.assertIn(b"(word-index (bits 5))", rom)
@@ -98,9 +98,22 @@ class LoaderTests(unittest.TestCase):
             (1, 6, 0x204, 0x12000, 0x12000, 0, 8, 1),
         ):
             with self.subTest(row=row), self.assertRaises(ElfError) as outcome:
-                memory_image(executable([code, row], bytes(8)), for_rom=True)
+                memory_image(executable([code, row], bytes(8)), layout=ROM_LAYOUTS["boot"])
             self.assertEqual((outcome.exception.kind, outcome.exception.header_index),
                              (ErrorKind.SEGMENT, 1))
+
+    def test_core_rom_ends_before_bss_even_with_larger_index(self):
+        core = ROM_LAYOUTS["core"]
+        payload = bytes.fromhex("13000000")
+        code = (1, 5, 0x200, BASE, BASE, 4, 0x6000, 1)
+        bss = (1, 6, 0x204, 0x16000, 0x16000, 0, 0x2040, 1)
+        stack = (1, 6, 0x204, 0x2BF00, 0x2BF00, 0, 0x4100, 1)
+        image = memory_image(executable([code, bss, stack], payload), layout=core)
+        self.assertIn(b"(word-index (bits 12))", ncg2_rom_source(image, address_bits=core.address_bits))
+        outside = (1, 5, 0x204, 0x16000, 0x16000, 0, 1, 1)
+        with self.assertRaises(ElfError) as outcome:
+            memory_image(executable([code, outside], payload), layout=core)
+        self.assertEqual(outcome.exception.header_index, 1)
 
 
 if __name__ == "__main__":
