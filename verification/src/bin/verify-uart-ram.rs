@@ -134,9 +134,13 @@ fn emit(out: &mut impl Write, vm: &ClockedVm) -> Result<(), Box<dyn Error>> {
 
 /// 実行設定と同じ演算器・RAMを使い、ローダーから切り替える経路を展開する。
 fn lower_handoff(module: &str) -> Result<ClockedVm, Box<dyn Error>> {
+    lower_configured("uart-loader.toml", module)
+}
+
+fn lower_configured(configuration: &str, module: &str) -> Result<ClockedVm, Box<dyn Error>> {
     use std::{fs, path::Path};
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let config = circuitgame2_project_config::parse(&fs::read(root.join("uart-loader.toml"))?)
+    let config = circuitgame2_project_config::parse(&fs::read(root.join(configuration))?)
         .map_err(|error| format!("{error:?}"))?;
     let texts = config.sources.get_ref().iter()
         .map(|path| fs::read_to_string(root.join(path.get_ref()))).collect::<Result<Vec<_>, _>>()?;
@@ -197,22 +201,55 @@ fn emit_handoff(out: &mut impl Write, vm: &ClockedVm) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    if std::env::args().nth(1).as_deref() == Some("--handoff") {
-        return emit_handoff(
-            &mut io::BufWriter::new(io::stdout().lock()),
-            &lower_handoff("uart-loader-route")?,
-        );
+/// ヘッダーを任意の64ビット値にし、ACK、エラー、RAM 許可、完了の各時刻を照合する。
+fn emit_loader_header(out: &mut impl Write, vm: &ClockedVm) -> Result<(), Box<dyn Error>> {
+    const TICKS: usize = 120;
+    let network = LatchNetwork::read(vm)?;
+    if (network.external, network.nor.outputs.len()) != (66, 132) {
+        return Err("UART ローダーの入出力幅が参照仕様と異なる。".into());
     }
-    emit(
-        &mut io::BufWriter::new(io::stdout().lock()),
-        &lower("uart-ram-route")?,
-    )
+    writeln!(out, "(set-logic QF_BV)\n(set-option :timeout 60000)")?;
+    writeln!(out, "(declare-const count (_ BitVec 64))")?;
+    writeln!(out, "(define-fun valid () Bool (and (bvuge count (_ bv1 64)) (bvule count (_ bv33792 64))))")?;
+    network.emit_state(out, "loader", true)?;
+    for tick in 1..=TICKS {
+        for bit in 0..64 {
+            writeln!(out, "(define-fun i_{tick}_{bit} () Bool (= ((_ extract {bit} {bit}) count) #b1))")?;
+        }
+        writeln!(out, "(define-fun i_{tick}_64 () Bool {})", (24..112).contains(&tick))?;
+        writeln!(out, "(define-fun i_{tick}_65 () Bool false)")?;
+        network.emit_step(out, "loader", tick)?;
+    }
+    writeln!(out, "(assert (or")?;
+    for tick in 1..=TICKS {
+        let observed = |port: usize| network.wire(network.nor.outputs[port], "loader", tick, tick);
+        let ack = if tick == 102 { "valid" } else { "false" };
+        let error = if tick >= 105 { "(not valid)" } else { "false" };
+        writeln!(out, "  (distinct {} {ack})", observed(0))?;
+        writeln!(out, "  {}", observed(129))?;
+        writeln!(out, "  {}", observed(130))?;
+        writeln!(out, "  (distinct {} {error})", observed(131))?;
+    }
+    writeln!(out, "))\n(check-sat-using (then simplify propagate-values solve-eqs bit-blast sat))")?;
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    match std::env::args().nth(1).as_deref() {
+        Some("--handoff") => emit_handoff(&mut out, &lower_handoff("uart-loader-route")?),
+        Some("--loader-header") => emit_loader_header(
+            &mut out, &lower_configured("uart-circuit-loader.toml", "uart-circuit-loader")?,
+        ),
+        None => emit(&mut out, &lower("uart-ram-route")?),
+        _ => Err("設定なし、--handoff、または --loader-header を指定する。".into()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MAP_DEPTH, lower, lower_handoff};
+    use super::{MAP_DEPTH, lower, lower_configured, lower_handoff};
     use circuitgame2_core::netlist::ClockedVm;
 
     fn tick(vm: &mut ClockedVm, address: u64, value: u64, write: bool) -> u64 {
@@ -436,6 +473,178 @@ mod tests {
             }
         }
         panic!("ローダーから RAM を引き渡しても、CPU が期待する値を書き込まなかった");
+    }
+
+    #[test]
+    fn circuit_loader_matches_reference_word_order_and_starts_the_cpu() {
+        use ncg2_uart_loader::{BootLoader, ENTRY_ADDRESS, Receive};
+        let mut vm = lower_configured("uart-circuit-loader.toml", "uart-circuit-loader-system").unwrap();
+        let mut reference = BootLoader::reset();
+        let words = [0x02a0_0313_0001_02b7, 0x0000_006f_0262_b023];
+        let probe = ENTRY_ADDRESS + 32;
+        let input_words: Vec<_> = [words.len() as u64].into_iter().chain(words).collect();
+        let mut requests = Vec::new();
+        let mut committed = Vec::new();
+        let mut reference_words = Vec::new();
+        let mut last_address = 0;
+        let mut stable = 0;
+        let mut first_owner = None;
+        let mut first_issue = None;
+        let mut retirements = Vec::new();
+        let mut pins = [false; 65];
+        for bit in 0..64 {
+            pins[bit + 1] = (probe >> bit) & 1 != 0;
+        }
+
+        for (index, rx) in continuous_wire(&words, 8).take(10_000).enumerate() {
+            let tick = index + 1;
+            // 語は8番目の受信バイトの公開から13 tick 後に揃う。
+            let input = input_words.iter().enumerate().find_map(|(i, &word)| {
+                (tick == 17 + (8 * i + 7) * 80 + 87 + 13 + 1).then_some(Receive::Word(word))
+            }).unwrap_or(Receive::Idle);
+            let frame = reference.step(input);
+            if let Some(word) = frame.committed { reference_words.push((word.address, word.data)); }
+
+            pins[0] = rx;
+            let output = vm.step(&pins).unwrap();
+            let owner = output[192];
+            let issue = output[193];
+            let commit = output[194];
+            assert!(!output[195], "tick {tick}: CPU が停止した");
+            assert!(!output[197], "tick {tick}: UART エラー");
+            let address = read_word(&output[64..128]);
+            if last_address == address { stable += 1; } else { stable = 1; last_address = address; }
+            if output[196] && !owner {
+                assert!(stable >= 32, "tick {tick}: アドレス保持が足りない");
+                requests.push((tick, address));
+            }
+            if !owner {
+                assert!(!issue && !commit, "tick {tick}: RAM 所有権を渡す前に実行した");
+                for (i, &word) in words.iter().enumerate() {
+                    let address = ENTRY_ADDRESS + i as u64 * 8;
+                    let expected = requests.get(i).filter(|(write, _)| tick >= write + 3).map_or(0, |_| word);
+                    let actual = stored(&vm, address, 15);
+                    assert_eq!(actual, expected, "tick {tick}, {address:#x}");
+                    if requests.get(i).is_some_and(|(write, _)| tick == write + 3) {
+                        committed.push((address, actual));
+                    }
+                }
+                continue;
+            }
+
+            if first_owner.is_none() {
+                first_owner = Some(tick);
+                assert!(frame.cpu_ready);
+                assert_eq!(committed, reference_words);
+            }
+            if issue && first_issue.is_none() { first_issue = Some(tick); }
+            if commit { retirements.push(read_word(&output[..64])); }
+            if retirements.len() == 3 && stored(&vm, probe, 15) == 42 {
+                assert_eq!(retirements, [ENTRY_ADDRESS, ENTRY_ADDRESS + 4, ENTRY_ADDRESS + 8]);
+                eprintln!("write {requests:?}, owner {first_owner:?}, issue {first_issue:?}, result tick {tick}");
+                return;
+            }
+        }
+        panic!("連続受信から RAM へ格納したアプリが結果を書かなかった");
+    }
+
+    #[test]
+    fn circuit_loader_stops_on_a_bad_stop_bit_before_storing_the_word() {
+        let mut vm = lower_configured("uart-circuit-loader.toml", "uart-circuit-loader-system").unwrap();
+        // ヘッダーに続くペイロードの最初のバイトだけ、停止ビットを Low にする。
+        let bad_stop = 17 + 8 * 80 + 72;
+        let mut error = false;
+        let mut pins = [false; 65];
+        for (index, rx) in continuous_wire(&[0xa5], 8).take(1_600).enumerate() {
+            let tick = index + 1;
+            pins[0] = rx && !(bad_stop..bad_stop + 8).contains(&tick);
+            let output = vm.step(&pins).unwrap();
+            assert!(!output[192] && !output[193] && !output[194] && !output[196], "tick {tick}");
+            assert!(!error || output[197], "tick {tick}: 受信エラーが消えた");
+            error = output[197];
+        }
+        assert!(error);
+        assert_eq!(stored(&vm, 0x10000, 15), 0);
+    }
+
+    #[test]
+    fn circuit_loader_checks_both_header_bounds() {
+        let mut vm = lower_configured("uart-circuit-loader.toml", "uart-circuit-loader").unwrap();
+        for count in [0u64, 1, 0x8400, 0x8401, u64::MAX] {
+            vm.reset();
+            let valid = (1..=0x8400).contains(&count);
+            let mut input = [false; 66];
+            for bit in 0..64 {
+                input[bit] = (count >> bit) & 1 != 0;
+            }
+            let mut ack = Vec::new();
+            for tick in 1..=150 {
+                input[64] = (24..112).contains(&tick);
+                let output = vm.step(&input).unwrap();
+                if output[0] { ack.push(tick); }
+                assert!(!output[129] && !output[130], "header {count:#x}, tick {tick}");
+                assert_eq!(output[131], !valid && tick >= 105, "header {count:#x}, tick {tick}");
+            }
+            if valid {
+                assert_eq!(ack, [102], "header {count:#x}");
+            } else {
+                assert!(ack.is_empty(), "header {count:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn circuit_loader_keeps_a_waiting_word_and_cancels_on_error() {
+        let words = [2, 0x1234, 0x7788];
+        let mut vm = lower_configured("uart-circuit-loader.toml", "uart-circuit-loader").unwrap();
+        for corrupted in [false, true] {
+            vm.reset();
+            let mut next = 0;
+            let mut present = 24;
+            let mut acknowledgements = Vec::new();
+            let mut writes = Vec::new();
+            let mut ready = false;
+            let mut input = [false; 66];
+            let mut appeared = Vec::new();
+            for tick in 1..700 {
+                if next < words.len() && tick == present {
+                    ready = true;
+                    appeared.push(tick);
+                    for bit in 0..64 {
+                        input[bit] = (words[next] >> bit) & 1 != 0;
+                    }
+                }
+                input[64] = ready;
+                input[65] = corrupted && acknowledgements.len() >= 2;
+                let output = vm.step(&input).unwrap();
+                if output[0] {
+                    assert!(ready);
+                    acknowledgements.push(tick);
+                    ready = false;
+                    next += 1;
+                    present = tick + 20;
+                }
+                if output[129] {
+                    writes.push((tick, read_word(&output[1..65]), read_word(&output[65..129])));
+                }
+                if corrupted {
+                    assert!(!output[129] && !output[130]);
+                    if tick >= 300 {
+                        assert!(output[131]);
+                    }
+                } else {
+                    assert!(!output[131]);
+                    if output[130] {
+                        assert_eq!(writes.iter().map(|(_, address, data)| (*address, *data)).collect::<Vec<_>>(),
+                                   [(0x10000, words[1]), (0x10008, words[2])]);
+                        assert!(appeared[2] < writes[0].0 && writes[0].0 < acknowledgements[2]);
+                        break;
+                    }
+                }
+            }
+            assert_eq!(acknowledgements.len(), if corrupted { 2 } else { 3 });
+            assert_eq!(writes.len(), if corrupted { 0 } else { 2 });
+        }
     }
 
     #[test]
