@@ -4,7 +4,7 @@ use circuitgame2_core::netlist::{ClockedVm, TickInputError, Wire};
 use ncg2_event_queue::{
     EvaluationQueue,
     fanout::{Pin, ReverseDependencies, StoragePins},
-    latch_lanes::{changed_lanes, consecutive_tail},
+    latch_lanes::{changed_lanes, consecutive_tail, shift_latch_word},
     nor_inputs::PackedNorInputs,
 };
 use std::ops::Range;
@@ -22,6 +22,7 @@ struct Storage {
     pins: StoragePins,
     ram: Option<Vec<bool>>,
     consecutive_tail: Option<usize>,
+    shift_word: Option<u64>,
 }
 
 /// Core の展開済み配線で、変化のある素子を再評価する検証用の実行器。
@@ -52,7 +53,7 @@ impl EventVm {
     ///
     /// 外部入力、状態素子の出力区間または RAM の容量が展開済みの配線と整合しない場合や、定数を含む配線の添字を表せない場合に返す。
     pub fn new(vm: &ClockedVm) -> Result<Self, &'static str> {
-        Self::with_latch_lanes(vm, false)
+        Self::with_latch_lanes(vm, false, false)
     }
 
     /// 連続した配線を持つラッチの変更ビットを8ビットずつ調べる。
@@ -61,10 +62,19 @@ impl EventVm {
     ///
     /// 配線または容量が [`Self::new`] の構築条件を満たさない場合に返す。
     pub fn new_with_latch_lanes(vm: &ClockedVm) -> Result<Self, &'static str> {
-        Self::with_latch_lanes(vm, true)
+        Self::with_latch_lanes(vm, true, false)
     }
 
-    fn with_latch_lanes(vm: &ClockedVm, lanes: bool) -> Result<Self, &'static str> {
+    /// 連続した配線の比較に加え、1ビットずつ進むラッチをワードで評価する。
+    ///
+    /// # Errors
+    ///
+    /// 配線または容量が Self::new の構築条件を満たさない場合に返す。
+    pub fn new_with_shift_latches(vm: &ClockedVm) -> Result<Self, &'static str> {
+        Self::with_latch_lanes(vm, true, true)
+    }
+
+    fn with_latch_lanes(vm: &ClockedVm, lanes: bool, shift: bool) -> Result<Self, &'static str> {
         let net = vm.netlist();
         let external = vm.external_input_count();
         let augmented = net.input_count;
@@ -116,6 +126,8 @@ impl EventVm {
             } else {
                 None
             };
+            let shift_word = (shift && data.len() <= 64 && consecutive_tail == Some(output.start))
+                .then_some(0);
             storage.push(Storage {
                 output,
                 pins: StoragePins {
@@ -125,6 +137,7 @@ impl EventVm {
                 },
                 ram,
                 consecutive_tail,
+                shift_word,
             });
         }
         if next != augmented {
@@ -160,6 +173,9 @@ impl EventVm {
     pub fn reset(&mut self) -> &[bool] {
         self.nor.reset();
         for device in &mut self.storage {
+            if let Some(word) = &mut device.shift_word {
+                *word = 0;
+            }
             if let Some(ram) = &mut device.ram {
                 ram.fill(false);
             }
@@ -257,7 +273,7 @@ impl EventVm {
     }
 
     fn evaluate_storage(&mut self, index: usize) {
-        let device = &self.storage[index];
+        let device = &mut self.storage[index];
         let enabled = device.pins.enable.read(self.nor.read_only());
         if let Some(ram) = &device.ram {
             let mut word = 0;
@@ -283,6 +299,20 @@ impl EventVm {
                 }
             }
         } else if enabled {
+            if let Some(word) = &mut device.shift_word {
+                let slots = self.nor.read_only();
+                let head = device.pins.data[0].read(slots);
+                let (next, mut changes) = shift_latch_word(*word, device.output.len() as u32, head)
+                    .expect("構築時にラッチの幅を検査済み");
+                // 他の素子が読む配線は、すべての評価が終わるまで書き換えない。
+                *word = next;
+                while changes != 0 {
+                    let lane = changes.trailing_zeros() as usize;
+                    self.changes.push((device.output.start + lane, next & (1u64 << lane) != 0));
+                    changes &= changes - 1;
+                }
+                return;
+            }
             if let Some(base) = device.consecutive_tail {
                 let slots = self.nor.read_only();
                 let first = device.output.start;

@@ -72,4 +72,52 @@ pub fn changed_lanes(old: &[bool; 8], next: &[bool; 8]) -> (mask: u8)
     result
 }
 
+
+/// 幅以内の各ビットを1段進め、先頭に採取値を入れる。
+///
+/// 更新後の状態と変更ビットを返す。幅が1から64の範囲外なら None を返す。
+#[inline]
+pub fn shift_latch_word(old: u64, width: u32, head: bool) -> (result: Option<(u64, u64)>)
+    ensures
+        result.is_some() <==> 1 <= width <= 64,
+        result matches Some((next, changed)) ==>
+            (forall|i: u32| i < width ==> (#[trigger] (next >> i) & 1 != 0)
+                == (if i == 0 { head } else { (old >> ((i - 1) as u32)) & 1 != 0 }))
+            && (forall|i: u32| i < 64 ==> (#[trigger] (changed >> i) & 1 != 0)
+                == (i < width && ((old >> i) & 1) != ((next >> i) & 1)))
+            && (forall|i: u32| width <= i < 64 ==> (#[trigger] (next >> i) & 1) == 0),
+{
+    if width == 0 || width > 64 {
+        return None;
+    }
+    let head_bit = head as u64;
+    let limit = u64::MAX >> (64 - width);
+    let next = ((old << 1) | head_bit) & limit;
+    let changed = (old ^ next) & limit;
+    assert forall|i: u32| i < 64 implies {
+        &&& i < width ==> (#[trigger] (next >> i) & 1) ==
+            (if i == 0 { head_bit } else { (old >> ((i - 1) as u32)) & 1 })
+        &&& width <= i ==> ((next >> i) & 1) == 0
+        &&& ((changed >> i) & 1 != 0)
+            == (i < width && ((old >> i) & 1) != ((next >> i) & 1))
+    } by {
+        assert(
+            (i < width ==> ((next >> i) & 1) ==
+                (if i == 0 { head_bit } else { (old >> ((i - 1) as u32)) & 1 }))
+            && (width <= i ==> ((next >> i) & 1) == 0)
+            && (((changed >> i) & 1 != 0)
+                == (i < width && ((old >> i) & 1) != ((next >> i) & 1)))
+        ) by(bit_vector)
+            requires 1 <= width <= 64, i < 64, head_bit <= 1,
+                limit == u64::MAX >> ((64 - width) as u32),
+                next == ((old << 1) | head_bit) & limit,
+                changed == (old ^ next) & limit;
+    };
+    assert forall|i: u32| i < 64 implies (#[trigger] (changed >> i) & 1 != 0)
+            == (i < width && ((old >> i) & 1) != ((next >> i) & 1)) by {
+        assert(i < width ==> (next >> i) & 1 == if i == 0 { head_bit } else { (old >> ((i - 1) as u32)) & 1 });
+    };
+    Some((next, changed))
+}
+
 } // verus!

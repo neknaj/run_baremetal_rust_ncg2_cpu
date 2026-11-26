@@ -37,7 +37,9 @@ struct Machine {
 
 impl Machine {
     fn new(mut reference: ClockedVm, limit: u64, loader: Loader) -> Result<Self, Box<dyn Error>> {
-        let mut event = if std::env::var_os("NCG2_BENCH_LATCH_LANES").is_some() {
+        let mut event = if std::env::var_os("NCG2_BENCH_SHIFT_LATCHES").is_some() {
+            EventVm::new_with_shift_latches(&reference)?
+        } else if std::env::var_os("NCG2_BENCH_LATCH_LANES").is_some() {
             EventVm::new_with_latch_lanes(&reference)?
         } else {
             EventVm::new(&reference)?

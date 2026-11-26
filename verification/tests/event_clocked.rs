@@ -151,9 +151,11 @@ fn grouped_latch_lanes_match_scalar_shift_at_each_tick() {
     };
     let mut core = ClockedVm::new(circuit, 1, vec![wiring], 64).unwrap();
     let mut grouped = EventVm::new_with_latch_lanes(&core).unwrap();
+    let mut shifted = EventVm::new_with_shift_latches(&core).unwrap();
 
     for _ in 0..2 {
         assert_eq!(grouped.reset(), core.reset());
+        assert_eq!(shifted.reset(), grouped.output());
         for tick in 1..=145 {
             let value = [1, 3, 7, 64, 67].contains(&tick);
             assert_eq!(
@@ -161,6 +163,7 @@ fn grouped_latch_lanes_match_scalar_shift_at_each_tick() {
                 core.step(&[value]).unwrap(),
                 "tick {tick}",
             );
+            assert_eq!(shifted.step(&[value]).unwrap(), grouped.output(), "tick {tick}");
         }
     }
 }
