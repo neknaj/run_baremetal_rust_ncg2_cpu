@@ -181,8 +181,10 @@ impl EventVm {
         if input.len() != self.external {
             return Err(TickInputError::InputCount);
         }
-        for (slot, &value) in input.iter().enumerate() {
-            self.publish(slot, value);
+        if !self.nor.input_matches(input) {
+            for (slot, &value) in input.iter().enumerate() {
+                self.publish(slot, value);
+            }
         }
 
         self.evaluated = self.queue.pending_count();
