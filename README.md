@@ -96,6 +96,8 @@ ncg2 check programs/boot.ncg2m
 
 `selfhost.toml` では、ベアメタル Rust から Core を呼び、RAM 上のソースを解析する。続いて固定の NOR 回路を評価し、ノード数と出力を書き戻す。[ビルドと検証手順](doc/selfhost.md)
 
+`compile-circuit` を指定してビルドすると、受け取った回路ソースを Core で NOR に展開し、指定した入力で評価できる。この ELF は `uart-boot.toml` の回路へ要求データと一緒に転送する。[ビルドと UART 転送の手順](doc/selfhost.md#ram-の回路ソースを展開する-elf)
+
 ## 起動回路の部品を検証する
 
 検証ツールは Core が展開した NOR ネットリストを読み、参照仕様と出力が異なる入力が存在するかを Z3 に問い合わせる。対象は64ビットの算術・論理・比較、RAM のアドレス変換、[起動用の5種類の命令](doc/boot-execution.md)、[PC 相対の命令と条件分岐](doc/control-execution.md)である。

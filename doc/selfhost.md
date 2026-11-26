@@ -95,6 +95,19 @@ QEMU の検証器は58バイトの回路ソースを含む要求をメモリに�
 
 Rust 1.99.1 の Windows ホストでビルドした ELF は427,760バイト、SHA-256 は `6353379ef9c97e4984fc2a5feb9f4cbcf0b9362d125ec0641f7ace9929c198f8` だった。QEMU では `0x10000` から `boot_halt` の手前まで50,924命令を実行した。
 
+### NCG2 CPU と QEMU を照合する
+
+転送データはヘッダに続く33,778語を含む。次のコマンドは実際の `rx` ポートに8N1の波形を送り、ブートローダが前の語を消費するまで待ってから次の語を送る。アプリに移る前に転送した全語を RAM と照合する。実行中は退役した各命令の物理 PC を QEMU のログと比較し、`boot_halt` に達した時点で結果2語を検査する。
+
+```sh
+host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
+  --target "$host" --example verify_uart_selfhost -- uart-boot.toml \
+  selfhost/target/compile-uart.bin selfhost/target/compile-qemu.log 2b800113 600000000
+```
+
+最初の1,600 tick の公開出力を標準 VM と照合し、残りの実行には疎実行器を使う。標準 VM との全 tick の比較は、小さなプログラムを使う結合試験で行う。[UART ブートの結合試験](uart-boot.md#uart-からアプリを起動する結合試験)
+
 ## UART ブート用の転送データを作る
 
 `python tools/elf_image.py <ELF> <出力.bin> --format uart-boot` は、RAM から実行する ELF の転送データを作る。先頭の64ビット語は後続の語数を表す。後続の各語は物理アドレス `0x10000` から昇順に並び、すべてリトルエンディアンで送る。語数は1から `0x8400` までで、最後に書ける語の先頭は `0x51ff8` である。
