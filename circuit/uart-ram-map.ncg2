@@ -1,0 +1,30 @@
+(namespace rv64
+  (export uart-ram-map)
+
+  ;; 8バイト整列した物理アドレスを、独立した4つの RAM に振り分ける。
+  ;; 256 KiB のバンクでは物理アドレスの下位18ビットを使う。0x10000を起点に一周し、
+  ;; 同じ区間の異なる語が同じ添字になることはない。添字は選択したバンクだけで使う。
+  (func uart-ram-map
+    (in (address (bits 64)))
+    (out program tail mailbox stack (program-word (bits 15)) (tail-word (bits 10))
+         (mailbox-word (bits 5)) (stack-word (bits 11)))
+    (def program-start #x0000000000010000)
+    (def tail-start #x0000000000050000)
+    (def program-end #x0000000000052000)
+    (def mailbox-start #x00000000000fff00)
+    (def stack-start #x0000000000100000)
+    (def stack-end #x0000000000104000)
+    (def low (slice address 0 3))
+    (def aligned (execute-zero-3 low))
+    (def in-program (in-address-range address program-start tail-start))
+    (def in-tail (in-address-range address tail-start program-end))
+    (def in-mailbox (in-address-range address mailbox-start stack-start))
+    (def in-stack (in-address-range address stack-start stack-end))
+    (def program (execute-and aligned in-program))
+    (def tail (execute-and aligned in-tail))
+    (def mailbox (execute-and aligned in-mailbox))
+    (def stack (execute-and aligned in-stack))
+    (def program-word (slice address 3 15))
+    (def tail-word (slice address 3 10))
+    (def mailbox-word (slice address 3 5))
+    (def stack-word (slice address 3 11))))

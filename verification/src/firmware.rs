@@ -119,6 +119,7 @@ pub(super) fn emit_data_map(outputs: &[Wire]) {
             (0x11000, 0x12000, 9, 8),
             (0x2c000, 0x30000, 11, 17),
         ],
+        None,
     );
 }
 
@@ -132,10 +133,25 @@ pub(super) fn emit_selfhost_data_map(outputs: &[Wire]) {
             (0x2bf00, 0x2c000, 5, 27),
             (0x2c000, 0x30000, 11, 32),
         ],
+        None,
     );
 }
 
-fn emit_banks(outputs: &[Wire], banks: &[(u64, u64, usize, usize)]) {
+/// 起動用 RAM の区間と、同じバンクの別の物理語が同じ添字にならないことを照合する。
+pub(super) fn emit_uart_ram_map(outputs: &[Wire]) {
+    emit_banks(
+        outputs,
+        &[
+            (0x10000, 0x50000, 15, 4),
+            (0x50000, 0x52000, 10, 19),
+            (0xFFF00, 0x100000, 5, 29),
+            (0x100000, 0x104000, 11, 34),
+        ],
+        Some(0),
+    );
+}
+
+fn emit_banks(outputs: &[Wire], banks: &[(u64, u64, usize, usize)], rotated_bank: Option<usize>) {
     let address = vector((0..64).map(|i| format!("i{i}")));
     println!("(define-fun address () (_ BitVec 64) {address})");
     println!("(define-fun aligned () Bool (= (bvurem address (_ bv8 64)) (_ bv0 64)))");
@@ -151,8 +167,20 @@ fn emit_banks(outputs: &[Wire], banks: &[(u64, u64, usize, usize)]) {
                 .map(name),
         );
         differences.push(format!("(distinct {} bank-{bank})", name(outputs[bank])));
+        let extent = 1_u64 << word_bits;
+        let expected = if rotated_bank == Some(bank) {
+            println!("(declare-const other-address (_ BitVec 64))");
+            let other_word = format!("(bvurem (bvudiv other-address (_ bv8 64)) (_ bv{extent} 64))");
+            differences.push(format!(
+                "(and bank-{bank} (bvuge other-address (_ bv{start} 64)) (bvult other-address (_ bv{stop} 64)) (distinct address other-address) (= (bvurem other-address (_ bv8 64)) (_ bv0 64)) (= ((_ zero_extend {}) {word}) {other_word}))",
+                64 - word_bits,
+            ));
+            format!("(bvurem (bvudiv address (_ bv8 64)) (_ bv{extent} 64))")
+        } else {
+            format!("(bvudiv (bvsub address (_ bv{start} 64)) (_ bv8 64))")
+        };
         differences.push(format!(
-            "(and bank-{bank} (distinct ((_ zero_extend {}) {word}) (bvudiv (bvsub address (_ bv{start} 64)) (_ bv8 64))))",
+            "(and bank-{bank} (distinct ((_ zero_extend {}) {word}) {expected}))",
             64 - word_bits,
         ));
     }

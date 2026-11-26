@@ -58,7 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | "mul-round"
         | "firmware-dispatch"
         | "firmware-dispatch-core"
-        | "selfhost-data-map"),
+        | "selfhost-data-map"
+        | "uart-ram-map"),
     ) = args.get(1).map(String::as_str)
     else {
         return Err("検証対象の NCG2 関数名を指定する。対象は README と各設計文書を参照。".into());
@@ -127,6 +128,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "arithmetic.ncg2",
             "execute-boot.ncg2",
             "selfhost-map.ncg2",
+        ],
+        "uart-ram-map" => &[
+            "decode.ncg2",
+            "arithmetic.ncg2",
+            "execute-boot.ncg2",
+            "selfhost-map.ncg2",
+            "uart-ram-map.ncg2",
         ],
         "firmware-fetch" | "firmware-data-map" => &[
             "decode.ncg2",
@@ -205,6 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "firmware-fetch" => (64, 33),
         "firmware-data-map" => (64, 28),
         "selfhost-data-map" => (64, 43),
+        "uart-ram-map" => (64, 45),
         _ => unreachable!(),
     };
     assert_eq!((*input_count, outputs.len()), expected_shape);
@@ -216,6 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-logic" => Some(31),
         "mul-round" => Some(457),
         "firmware-dispatch" | "firmware-dispatch-core" => Some(505),
+        "uart-ram-map" => Some(48),
         _ => None,
     };
     if let Some(limit) = depth_limit {
@@ -264,6 +274,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firmware::emit_data_map(outputs);
     } else if selected == "selfhost-data-map" {
         firmware::emit_selfhost_data_map(outputs);
+    } else if selected == "uart-ram-map" {
+        firmware::emit_uart_ram_map(outputs);
     } else if selected == "mul-round" {
         multiply::emit(outputs);
     } else if matches!(selected, "firmware-dispatch" | "firmware-dispatch-core") {
