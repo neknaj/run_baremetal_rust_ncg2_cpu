@@ -108,6 +108,25 @@ cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
 
 最初の1,600 tick の公開出力を標準 VM と照合し、残りの実行には疎実行器を使う。標準 VM との全 tick の比較は、小さなプログラムを使う結合試験で行う。[UART ブートの結合試験](uart-boot.md#uart-からアプリを起動する結合試験)
 
+### 回路ソースと入力を指定する
+
+別の1入力・1出力の `invert` を評価する場合は、最大128バイトの回路ソースと入力ビットを指定する。例えば入力1の要求を作る手順は次のとおり。
+
+```sh
+elf=selfhost/target/compile/riscv64im-unknown-none-elf/release/ncg2-rv64im-core-selfhost
+work=selfhost/target/custom-request
+mkdir -p "$work"
+python tools/verify_selfhost_qemu.py "$elf" "$work/qemu.log" --profile compile-circuit \
+  --source invert.ncg2 --inputs 1 --request-out "$work/request.bin" --result-out "$work/result.bin"
+python tools/elf_image.py "$elf" "$work/uart.bin" --format uart-boot --request "$work/request.bin"
+host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
+  --target "$host" --example verify_uart_selfhost -- uart-boot.toml \
+  "$work/uart.bin" "$work/qemu.log" --result-file "$work/result.bin" 600000000
+```
+
+結果ファイルは終了状態と情報を64ビットずつリトルエンディアンで格納する。ソースの検査に失敗した場合も、ELF が `boot_halt` に達すれば、その失敗を表す終了状態を比較できる。
+
 ## UART ブート用の転送データを作る
 
 `python tools/elf_image.py <ELF> <出力.bin> --format uart-boot` は、RAM から実行する ELF の転送データを作る。先頭の64ビット語は後続の語数を表す。後続の各語は物理アドレス `0x10000` から昇順に並び、すべてリトルエンディアンで送る。語数は1から `0x8400` までで、最後に書ける語の先頭は `0x51ff8` である。

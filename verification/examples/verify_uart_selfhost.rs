@@ -230,7 +230,7 @@ fn flash(machine: &mut Machine, words: &[[u8; 8]]) -> Result<(), Box<dyn Error>>
 fn verify_execution(
     machine: &mut Machine,
     reference: &[u64],
-    info: u64,
+    expected: (u64, u64),
 ) -> Result<(), Box<dyn Error>> {
     while machine.pc() < ENTRY {
         machine.step(true)?;
@@ -266,9 +266,10 @@ fn verify_execution(
     let stack = machine.storage_index(11)?;
     let status = machine.read_word(stack, STATUS, 11)?;
     let information = machine.read_word(stack, INFORMATION, 11)?;
-    if (status, information) != (1, info) {
+    if (status, information) != expected {
+        let (expected_status, expected_info) = expected;
         return Err(format!(
-            "RAM の結果が QEMU と異なる。status={status:#x} information={information:#x}。"
+            "RAM の結果が QEMU と異なる。status={status:#x} information={information:#x}、QEMU の結果は {expected_status:#x} {expected_info:#x}。"
         )
         .into());
     }
@@ -281,17 +282,23 @@ fn verify_execution(
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let [project, image, log, info, limit] = args.as_slice() else {
-        return Err(
-            "実行設定、UART 転送データ、QEMU ログ、期待結果（16進）、tick 上限を指定する。".into(),
-        );
+    let (project, image, log, expected, limit) = match args.as_slice() {
+        [project, image, log, info, limit] => {
+            let info = u64::from_str_radix(
+                info.to_str().ok_or("結果には16進整数を指定する。")?.trim_start_matches("0x"),
+                16,
+            )?;
+            (project, image, log, (1, info), limit)
+        }
+        [project, image, log, flag, result, limit] if flag == "--result-file" => {
+            let bytes = fs::read(result)?;
+            let ([status, info], []) = bytes.as_chunks::<8>() else {
+                return Err("QEMU の結果ファイルにはリトルエンディアンの64ビット語が2個必要。".into());
+            };
+            (project, image, log, (u64::from_le_bytes(*status), u64::from_le_bytes(*info)), limit)
+        }
+        _ => return Err("実行設定、UART 転送データ、QEMU ログ、期待結果（16進または --result-file と結果ファイル）、tick 上限を指定する。".into()),
     };
-    let info = u64::from_str_radix(
-        info.to_str()
-            .ok_or("結果には16進整数を指定する。")?
-            .trim_start_matches("0x"),
-        16,
-    )?;
     let limit = limit
         .to_str()
         .ok_or("tick 上限には十進整数を指定する。")?
@@ -301,5 +308,5 @@ fn main() -> Result<(), Box<dyn Error>> {
     let reference = reference_pcs(Path::new(log))?;
     let mut machine = Machine::new(uart::machine(Path::new(project))?, limit)?;
     flash(&mut machine, words)?;
-    verify_execution(&mut machine, &reference, info)
+    verify_execution(&mut machine, &reference, expected)
 }
