@@ -88,6 +88,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "firmware-memory.ncg2",
             "execute-load.ncg2",
             "execute-logic.ncg2",
+            "subword-memory.ncg2",
+            "execute-subword.ncg2",
             "firmware-dispatch.ncg2",
         ],
         "execute-load" => &[

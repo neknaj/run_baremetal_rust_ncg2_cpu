@@ -33,6 +33,11 @@
                (ite (= funct3 #b001) (distinct rs1 rs2) (bvuge rs1 rs2)))))
 (define-fun ld () Bool (and (= op #b0000011) (= funct3 #b011)))
 (define-fun sd () Bool (and (= op #b0100011) (= funct3 #b011)))
+(define-fun lb () Bool (and (= op #b0000011) (= funct3 #b000)))
+(define-fun lbu () Bool (and (= op #b0000011) (= funct3 #b100)))
+(define-fun sb () Bool (and (= op #b0100011) (= funct3 #b000)))
+(define-fun sh () Bool (and (= op #b0100011) (= funct3 #b001)))
+(define-fun sw () Bool (and (= op #b0100011) (= funct3 #b010)))
 (define-fun op-xor () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b100)))
 (define-fun sltu () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b011)))
 (define-fun mul () Bool (and (= op #b0110011) (= funct7 #b0000001) (= funct3 #b000)))
@@ -47,12 +52,37 @@
 (define-fun sum-i () (_ BitVec 64) (bvadd rs1 immediate-i))
 (define-fun store-address () (_ BitVec 64) (bvadd rs1 immediate-s))
 (define-fun selected-store () Bool (and sd (aligned-word store-address)))
+(define-fun word-address ((address (_ BitVec 64))) (_ BitVec 64)
+  (bvand address #xfffffffffffffff8))
+(define-fun load-byte () Bool (or lb lbu))
+(define-fun selected-partial () Bool (or sb
+    (and sh (= (bvurem store-address (_ bv2 64)) (_ bv0 64)))
+    (and sw (= (bvurem store-address (_ bv4 64)) (_ bv0 64)))))
+(define-fun readable ((address (_ BitVec 64))) Bool
+  (or (ram address)
+      (in-range address #x0000000000010000 #x0000000000010100)))
 (define-fun load-ok () Bool
-  (and ld (aligned-word sum-i)
-       (or (ram sum-i) (in-range sum-i #x0000000000010000 #x0000000000010100))))
-(define-fun store-ok () Bool (and selected-store (ram store-address)))
+  (or (and ld (aligned-word sum-i) (readable sum-i))
+      (and load-byte (readable (word-address sum-i)))))
+(define-fun store-ok () Bool
+  (or (and selected-store (ram store-address))
+      (and selected-partial (ram (word-address store-address)))))
 (define-fun memory-address-expected () (_ BitVec 64)
-  (ite ld sum-i (ite selected-store store-address probe)))
+  (ite ld sum-i
+    (ite load-byte (word-address sum-i)
+      (ite selected-store store-address
+        (ite selected-partial (word-address store-address) probe)))))
+(define-fun byte-shift ((address (_ BitVec 64))) (_ BitVec 64)
+  (bvmul (bvurem address (_ bv8 64)) (_ bv8 64)))
+(define-fun read-byte () (_ BitVec 8)
+  ((_ extract 7 0) (bvlshr loaded-data (byte-shift sum-i))))
+(define-fun low-mask () (_ BitVec 64)
+  (ite sb #x00000000000000ff (ite sh #x000000000000ffff #x00000000ffffffff)))
+(define-fun partial-mask () (_ BitVec 64)
+  (bvshl low-mask (byte-shift store-address)))
+(define-fun merged () (_ BitVec 64)
+  (bvor (bvand loaded-data (bvnot partial-mask))
+        (bvshl (bvand rs2 low-mask) (byte-shift store-address))))
 
 (define-fun absolute-pc () (_ BitVec 64) (bvadd pc (_ bv65536 64)))
 (define-fun jump-offset () (_ BitVec 64)
@@ -79,7 +109,8 @@
             (distinct register-write register-write-expected)
             (distinct memory-write memory-write-expected)
             (distinct memory-address memory-address-expected)
-            (distinct store-data rs2)
+            (and memory-write-expected
+                 (distinct store-data (ite selected-partial merged rs2)))
             (and register-write-expected
                  (or (and addi (distinct register-data sum-i))
                      (and slli (distinct register-data
@@ -88,6 +119,8 @@
                      (and auipc (distinct register-data (bvadd absolute-pc immediate-u)))
                      (and (or jal jalr) (distinct register-data (bvadd absolute-pc (_ bv4 64))))
                      (and ld (distinct register-data loaded-data))
+                     (and lb (distinct register-data ((_ sign_extend 56) read-byte)))
+                     (and lbu (distinct register-data ((_ zero_extend 56) read-byte)))
                      (and op-xor (distinct register-data (bvxor rs1 rs2)))
                      (and sltu (distinct register-data
                        (ite (bvult rs1 rs2) (_ bv1 64) (_ bv0 64))))

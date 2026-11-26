@@ -1,6 +1,6 @@
 # Rust 起動プログラムの実行
 
-`::rv64::firmware-machine` は、起動 ELF を格納した ROM をフェッチし、レジスタとデータメモリを更新する。現在の起動プログラムが使う ADDI、SLLI、LUI、SD、JAL、AUIPC、BEQ、BNE、BGEU、JALR、LD、XOR、SLTU、MUL を扱う。リセット時に起動アドレス `0x10000` から実行を始める。
+`::rv64::firmware-machine` は起動 ELF を格納した ROM をフェッチし、レジスタとデータメモリを更新する。起動プログラムが使う ADDI、SLLI、LUI、SD、JAL、AUIPC、BEQ、BNE、BGEU、JALR、LD、XOR、SLTU、MUL に加え、LB、LBU、SB、SH、SW を扱う。リセット時に起動アドレス `0x10000` から実行を始める。
 
 ## 命令の完了と書き込み
 
@@ -10,13 +10,13 @@
 
 ## 結果領域の観測
 
-LD または SD を処理している間は、その命令がメモリのデータポートを使う。他の命令では観測用のアドレスを選ぶ。`memory-address` は現在選んでいるアドレスを示し、`probe-data` にはメモリの読み出し遅延がある。観測するときはアドレスを保持し、選択後のアドレスが確定してから32 tick 待つ。[メモリの読み出し規則](firmware-memory.md#ram-の更新と読み出し)
+ロードまたはストアを処理している間は、その命令がメモリのデータポートを使う。他の命令では観測用のアドレスを選ぶ。`memory-address` は現在選んでいるアドレスを示し、`probe-data` にはメモリの読み出し遅延がある。観測するときはアドレスを保持し、選択後のアドレスが確定してから32 tick 待つ。[メモリの読み出し規則](firmware-memory.md#ram-の更新と読み出し)
 
 `firmware.toml` の `::rv64::firmware-demo` は、プログラムが積と終了状態を RAM に書くのを待ち、読み出した2語を出力に保持する。同梱イメージでは、82,894 tick で `finished` が立つ。プログラム終了後の JAL 自己ループは引き続き動作する。
 
 ## 検証の範囲
 
-結合テストは実際の ROM から実行し、BSS の初期化ループ、LD、MUL、Rust からの復帰と、結果領域の値を確認する。
+結合テストは実際の ROM から実行し、BSS の初期化ループ、LD、MUL、Rust からの復帰と、結果領域の値を確認する。別の命令列で部分書き込み、LB・LBU の拡張、非整列 SH による停止も確認する。[バイト読み出しと部分書き込み](subword-memory.md)
 
 ```sh
 host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')

@@ -1,12 +1,12 @@
 //! 起動 ELF をフェッチし、Core の VM 上で命令とメモリアクセスを照合する。
 
+use circuitgame2_core::netlist::ClockedVm;
 use circuitgame2_core::project::{
     ClockedModuleVmLimits, ModuleBodyPosition, SourceSnapshot, check_use_aliases,
     index_use_targets, parse_circuit_project,
 };
 
-#[test]
-fn runs_the_rust_elf_to_its_halt_loop() {
+fn machine(rom_override: Option<&str>) -> ClockedVm {
     let sources = [
         "decode",
         "boot-rom",
@@ -22,6 +22,8 @@ fn runs_the_rust_elf_to_its_halt_loop() {
         "execute-load",
         "execute-logic",
         "multiply",
+        "subword-memory",
+        "execute-subword",
         "firmware-dispatch",
         "firmware-machine",
     ];
@@ -29,7 +31,10 @@ fn runs_the_rust_elf_to_its_halt_loop() {
         .iter()
         .map(|name| {
             let path = format!("../circuit/{name}.ncg2");
-            let text = std::fs::read_to_string(&path).unwrap();
+            let text = match (rom_override, *name) {
+                (Some(rom), "firmware-rom") => rom.to_owned(),
+                _ => std::fs::read_to_string(&path).unwrap(),
+            };
             (format!("{name}.ncg2"), text)
         })
         .collect();
@@ -58,7 +63,7 @@ fn runs_the_rust_elf_to_its_halt_loop() {
         .iter()
         .position(|entry| entry.form == form)
         .unwrap();
-    let mut vm = aliases
+    aliases
         .lower_clocked_vm(
             ModuleBodyPosition { file, entry },
             ClockedModuleVmLimits {
@@ -70,7 +75,12 @@ fn runs_the_rust_elf_to_its_halt_loop() {
         )
         .unwrap()
         .unwrap()
-        .vm;
+        .vm
+}
+
+#[test]
+fn runs_the_rust_elf_to_its_halt_loop() {
+    let mut vm = machine(None);
     assert_eq!(vm.reset(), [false; 260]);
 
     // BSS 走査を1周し、Rust の結果を書き出し、終了後の自己ループへ戻る。
@@ -145,6 +155,100 @@ fn runs_the_rust_elf_to_its_halt_loop() {
     let output = vm.step(&status_address).unwrap();
     assert_eq!(word(&output[128..192]), 0x2fff0);
     assert_eq!(word(&output[64..128]), 1);
+}
+
+#[test]
+fn partial_stores_preserve_unaddressed_bytes_through_the_cpu() {
+    let instructions: [u32; 12] = [
+        0x0001_10b7, // lui x1,0x11
+        0x0001_0137, // lui x2,0x10
+        0x0601_3183, // ld x3,0x60(x2)
+        0x0030_b023, // sd x3,0(x1)
+        0xf830_0193, // addi x3,x0,-125
+        0x0030_80a3, // sb x3,1(x1)
+        0x0010_8203, // lb x4,1(x1)
+        0x0010_c283, // lbu x5,1(x1)
+        0x0040_9123, // sh x4,2(x1)
+        0x0050_a223, // sw x5,4(x1)
+        0x0000_b303, // ld x6,0(x1)
+        0x0040_90a3, // sh x4,1(x1)
+    ];
+    let mut words = [0; 32];
+    for (index, pair) in instructions.chunks_exact(2).enumerate() {
+        words[index] = u64::from(pair[0]) | (u64::from(pair[1]) << 32);
+    }
+    words[12] = 0xa1b2_c3d4_e5f6_0718;
+    let mut vm = machine(Some(&constant_rom(words)));
+    vm.reset();
+    let input = bits(0x11000);
+    let mut committed = Vec::new();
+    let mut stopped = false;
+    for _ in 0..13_000 {
+        let output = vm.step(&input).unwrap();
+        let pc = word(&output[..64]);
+        if output[258] {
+            committed.push(pc);
+            match pc {
+                0x14 | 0x20 | 0x24 => {
+                    assert!(output[257]);
+                    assert_eq!(word(&output[128..192]), 0x11000);
+                }
+                0x18 => assert_eq!(word(&output[192..256]), (-125i64) as u64),
+                0x1c => assert_eq!(word(&output[192..256]), 0x83),
+                0x28 => assert_eq!(word(&output[192..256]), 0x0000_0083_ff83_8318),
+                _ => {}
+            }
+        }
+        if output[259] {
+            assert_eq!(pc, 0x2c);
+            stopped = true;
+        }
+        if stopped {
+            assert!(!output[256] && !output[257] && !output[258]);
+        }
+    }
+    assert!(stopped);
+    assert_eq!(committed, (0..0x2c).step_by(4).collect::<Vec<_>>());
+    assert_eq!(
+        word(&vm.step(&input).unwrap()[64..128]),
+        0x0000_0083_ff83_8318
+    );
+}
+
+fn constant_rom(words: [u64; 32]) -> String {
+    use std::fmt::Write;
+    let mut source = String::from(
+        "(namespace rv64 (export firmware-rom) (func firmware-rom (in (addr (bits 5))) (out (word (bits 64)))",
+    );
+    let mut leaves = Vec::new();
+    for (index, word) in words.into_iter().enumerate() {
+        let name = format!("literal-{index}");
+        writeln!(source, "(def {name} #x{word:016x})").unwrap();
+        leaves.push(name);
+    }
+    for bit in 0..5 {
+        writeln!(source, "(def s-{bit} (bit addr {bit}))").unwrap();
+        leaves = leaves
+            .chunks_exact(2)
+            .enumerate()
+            .map(|(column, pair)| {
+                let name = if bit == 4 {
+                    "word".to_owned()
+                } else {
+                    format!("stage-{bit}-{column}")
+                };
+                writeln!(
+                    source,
+                    "(def {name} (::rv64::arithmetic::select s-{bit} {} {}))",
+                    pair[0], pair[1]
+                )
+                .unwrap();
+                name
+            })
+            .collect();
+    }
+    source.push_str("))");
+    source
 }
 
 fn bits(value: u64) -> [bool; 64] {
