@@ -818,6 +818,36 @@ proof fn idle_running_holds(
     }
 }
 
+/// 命令の分類が確定する前でも、前の命令枠から早すぎる退役が来ないことを示す。
+pub proof fn window_rejects_issue_before_dispatch(
+    start: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+    simple: spec_fn(int) -> bool,
+    i: int,
+)
+    requires
+        cpu_multiply_start_path(start, issue, commit, simple, finished),
+        cpu_simple_path(simple, issue),
+        4 <= i,
+        forall|t: int| i - 1035 <= t < i ==> !(#[trigger] issue(t)),
+        forall|t: int| i - 8 <= t < i + 1027 ==> !(#[trigger] finished(t)),
+    ensures
+        forall|t: int| i < t < i + 1036 ==> !(#[trigger] issue(t)),
+{
+    assert forall|t: int| i < t < i + 1036 implies !(#[trigger] issue(t)) by {
+        if issue(t) {
+            let retired = t - 9;
+            assert(commit(t - 3));
+            assert(simple((t - 3) - 6) || finished((t - 3) - 6));
+            assert(!finished(retired));
+            simple_notification_follows_issue(simple, issue, retired);
+            assert(!issue(retired - 1027));
+        }
+    }
+}
+
 /// 通常命令では乗算器の静穏状態を次の命令枠へ引き継げる。
 pub proof fn ordinary_window_keeps_multiplier_idle(
     start: spec_fn(int) -> bool,
@@ -845,16 +875,7 @@ pub proof fn ordinary_window_keeps_multiplier_idle(
         forall|t: int| i + 1024 <= t <= i + 2073 ==> !(#[trigger] running(t)),
         multiplier_window_ready(capture, finished, running, issue, i + 1036),
 {
-    assert forall|t: int| i < t < i + 1036 implies !(#[trigger] issue(t)) by {
-        if issue(t) {
-            let retired = t - 9;
-            assert(commit(t - 3));
-            assert(simple((t - 3) - 6) || finished((t - 3) - 6));
-            assert(!finished(retired));
-            simple_notification_follows_issue(simple, issue, retired);
-            assert(!issue(retired - 1027));
-        }
-    }
+    window_rejects_issue_before_dispatch(start, finished, issue, commit, simple, i);
     let s = i + 1027;
     assert forall|t: int| s - 5 <= t <= i + 2062 implies !(#[trigger] start(t)) by {
         if t != s {

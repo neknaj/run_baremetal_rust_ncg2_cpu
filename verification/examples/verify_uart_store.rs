@@ -272,7 +272,7 @@ fn verify_instruction_controls(
     let capture = instruction_latch.enable;
     let issue = delay_source(vm, capture, 72)?;
 
-    let (pc_latch, _) = latch(vm, Wire::Input(pc), 64)?;
+    let (pc_latch, pc_range) = latch(vm, Wire::Input(pc), 64)?;
     let commit = net.outputs[194];
     let (commit_retire, valid) = writer_inputs(vm, commit)?;
     let (issue_latch, _) = latch(vm, issue, 1)?;
@@ -293,8 +293,8 @@ fn verify_instruction_controls(
         return Err("PC の保持または初期・次回の命令開始回路が異なる。".into());
     }
 
-    let (first_latch, _) = latch(vm, Wire::Input(first), 64)?;
-    let (second_latch, _) = latch(vm, Wire::Input(second), 64)?;
+    let (first_latch, first_range) = latch(vm, Wire::Input(first), 64)?;
+    let (second_latch, second_range) = latch(vm, Wire::Input(second), 64)?;
     if delay_source(vm, first_latch.enable, 96)? != issue
         || delay_source(vm, second_latch.enable, 144)? != issue
         || first_latch.data != second_latch.data
@@ -384,7 +384,45 @@ fn verify_instruction_controls(
     {
         return Err("乗算の判定が取り込み済みの命令以外に依存する。".into());
     }
-    require_bound(&multiply_cone, instruction_range, 14, "命令から乗算の判定")?;
+    require_bound(
+        &multiply_cone,
+        instruction_range.clone(),
+        14,
+        "命令から乗算の判定",
+    )?;
+
+    // 乗算中に RAM のデータ応答や積が変わっても、退役の有効性は保持値だけで決まる。
+    let valid_cone = depths(net, &[valid], &net.outputs[128..192])?;
+    let fields = [
+        (pc_range, 32, "PC"),
+        (
+            instruction_range.start..instruction_range.end - 1,
+            500,
+            "命令",
+        ),
+        (
+            instruction_range.end - 1..instruction_range.end,
+            2,
+            "フェッチ有効",
+        ),
+        (first_range, 488, "rs1"),
+        (second_range, 68, "rs2"),
+    ];
+    if valid_cone.read_depth.is_some()
+        || valid_cone.inputs.iter().enumerate().any(|(index, depth)| {
+            depth.is_some() && !fields.iter().any(|(range, _, _)| range.contains(&index))
+        })
+    {
+        return Err("退役の有効性が保持した命令、PC、オペランド以外に依存する。".into());
+    }
+    for (range, bound, label) in fields {
+        require_bound(
+            &valid_cone,
+            range,
+            bound,
+            &format!("{label} から退役の有効性"),
+        )?;
+    }
     eprintln!("issue から命令・第1・第2取込: 73 / 97 / 145 tick、通常の書き込み: 1033 tick");
     Ok(())
 }
