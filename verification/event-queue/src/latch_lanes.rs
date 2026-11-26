@@ -6,6 +6,8 @@ use vstd::prelude::*;
 use vstd::{seq_lib::lemma_seq_contains_after_push, std_specs::bits::axiom_u64_trailing_zeros};
 
 use crate::fanout::Pin;
+#[cfg(verus_only)]
+use crate::wire_updates::{apply_wire_updates, assigned_wire_value};
 
 verus! {
 
@@ -450,6 +452,58 @@ pub open spec fn latch_pin_updates(
     }
     &&& forall|i: int, j: int| #![trigger updates[i], updates[j]]
         0 <= i < j < updates.len() ==> updates[i].0 < updates[j].0
+}
+
+/// 他の素子がラッチの出力を書かない場合、候補の確定後にキャッシュと配線が一致する。
+pub proof fn shift_cache_after_commit(
+    slots: Seq<bool>, wires: Seq<bool>, pins: Seq<Pin>, base: usize, next: u64,
+    before: Seq<(usize, bool)>, own: Seq<(usize, bool)>, after: Seq<(usize, bool)>,
+)
+    requires
+        9 <= pins.len() <= 64,
+        base + pins.len() <= wires.len() <= usize::MAX,
+        wires.len() <= slots.len(),
+        wires == slots.take(wires.len() as int),
+        latch_pin_updates(own, slots, pins, base),
+        forall|lane: usize| lane < pins.len() ==> #[trigger] lane_set(next, lane)
+            == pins[lane as int].value_model(slots),
+        forall|i: int| 0 <= i < before.len() ==>
+            !(base <= (#[trigger] before[i]).0 < base + pins.len()),
+        forall|i: int| 0 <= i < after.len() ==>
+            !(base <= (#[trigger] after[i]).0 < base + pins.len()),
+    ensures
+        word_matches_slots(next, apply_wire_updates(wires, before + own + after), base, pins.len() as int),
+{
+    let all = before + own + after;
+    assert forall|lane: usize| lane < pins.len() implies #[trigger] lane_set(next, lane)
+        == apply_wire_updates(wires, all)[base + lane] by {
+        let slot = (base + lane) as usize;
+        let value = pins[lane as int].value_model(slots);
+        assert forall|i: int| 0 <= i < all.len() && (#[trigger] all[i]).0 == slot
+            implies all[i].1 == value by {
+            if i < before.len() {
+                assert(all[i] == before[i]);
+            } else if i < before.len() + own.len() {
+                let j = i - before.len();
+                assert(all[i] == own[j]);
+                assert(own[j].1 == pins[slot - base].value_model(slots));
+            } else {
+                assert(all[i] == after[i - before.len() - own.len()]);
+            }
+        };
+        if wires[slot as int] != value {
+            let offset = lane as int;
+            assert(slot as int == base + offset);
+            assert(wires[base + offset] == slots[base + offset]);
+            assert((pins[offset].value_model(slots) != slots[base + offset])
+                == own.contains(((base + offset) as usize, pins[offset].value_model(slots))));
+            assert(own.contains((slot, value)));
+            let at = choose|at: int| 0 <= at < own.len() && own[at] == (slot, value);
+            assert(all[before.len() + at] == (slot, value));
+            assert(all.contains((slot, value)));
+        }
+        assigned_wire_value(wires, all, slot, value);
+    };
 }
 
 /// 自分の旧出力を1段ずらして読むラッチについて、実配線の確定候補と次のワードを求める。

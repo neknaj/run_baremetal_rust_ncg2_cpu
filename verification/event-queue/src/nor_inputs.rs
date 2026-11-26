@@ -190,6 +190,7 @@ impl PackedNorInputs {
         ensures
             final(self).pairs_model() == old(self).pairs_model(),
             final(self).wire_count_model() == old(self).wire_count_model(), final(self).has_constants(),
+            changed ==> slot < old(self).wire_count_model(),
             changed <==> slot < old(self).wires_model().len() && old(self).wires_model()[slot as int] != value,
             final(self).wires_model() == if changed {
                 old(self).wires_model().update(slot as int, value)
@@ -252,8 +253,12 @@ impl PackedNorInputs {
     /// 状態素子の既存の読み出し処理に渡す配線値と定数を借りる。
     #[inline]
     pub fn read_only(&self) -> (bits: &[bool])
-        ensures bits@ == self.slots_model(),
+        ensures
+            bits@ == self.slots_model(),
+            self.wires_model() == bits@.take(self.wire_count_model() as int),
+            self.wires_model().len() == self.wire_count_model(),
     {
+        proof { use_type_invariant(self); }
         self.bits.as_slice()
     }
 

@@ -6,6 +6,7 @@ use ncg2_event_queue::{
     fanout::{Pin, ReverseDependencies, StoragePins},
     latch_lanes::{changed_lanes, evaluate_shift_pins, latch_input_layout},
     nor_inputs::PackedNorInputs,
+    wire_updates::{publish_wire, publish_wire_updates},
 };
 use std::ops::Range;
 
@@ -238,10 +239,7 @@ impl EventVm {
         }
 
         // ここから登録出力を確定する。依存先は次の tick で再評価する。
-        for i in 0..self.changes.len() {
-            let (slot, value) = self.changes[i];
-            self.publish(slot, value);
-        }
+        publish_wire_updates(&mut self.nor, &self.users, &mut self.queue, &mut self.output, &self.changes);
         self.changes.clear();
         for &(index, start) in &self.ram_writes {
             let device = &mut self.storage[index];
@@ -258,17 +256,7 @@ impl EventVm {
     }
 
     fn publish(&mut self, slot: usize, value: bool) {
-        if !self.nor.set(slot, value) {
-            return;
-        }
-        let (nodes, outputs) = self
-            .users
-            .readers(slot)
-            .expect("値の列と逆引き表は同じ配線番号を使う");
-        self.queue.insert_all(nodes);
-        for &target in outputs {
-            self.output[target] = value;
-        }
+        publish_wire(&mut self.nor, &self.users, &mut self.queue, &mut self.output, slot, value);
     }
 
     fn evaluate_storage(&mut self, index: usize) {
