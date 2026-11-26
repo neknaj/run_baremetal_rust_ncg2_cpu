@@ -4,7 +4,7 @@ use circuitgame2_core::netlist::{ClockedVm, TickInputError, Wire};
 use ncg2_event_queue::{
     EvaluationQueue,
     fanout::{Pin, ReverseDependencies, StoragePins},
-    latch_lanes::{changed_lanes, consecutive_tail, evaluate_shift_latch},
+    latch_lanes::{changed_lanes, evaluate_shift_pins, latch_input_layout},
     nor_inputs::PackedNorInputs,
 };
 use std::ops::Range;
@@ -121,13 +121,12 @@ impl EventVm {
                 (Vec::new(), None)
             };
             let data: Vec<_> = wiring.data.iter().copied().map(pin).collect();
-            let consecutive_tail = if lanes && ram.is_none() && data.len() >= 9 {
-                consecutive_tail(&data)
+            let (consecutive_tail, shift_layout) = if ram.is_none() {
+                latch_input_layout(&data, output.start, lanes, shift)
             } else {
-                None
+                (None, false)
             };
-            let shift_word = (shift && data.len() <= 64 && consecutive_tail == Some(output.start))
-                .then_some(0);
+            let shift_word = shift_layout.then_some(0);
             storage.push(Storage {
                 output,
                 pins: StoragePins {
@@ -300,12 +299,10 @@ impl EventVm {
             }
         } else if enabled {
             if let Some(word) = &mut device.shift_word {
-                let slots = self.nor.read_only();
-                let head = device.pins.data[0].read(slots);
                 // 他の素子が読む配線は、すべての評価が終わるまで書き換えない。
-                *word = evaluate_shift_latch(
-                    &mut self.changes, device.output.start, *word, device.output.len() as u32, head,
-                ).expect("構築時にラッチの幅を検査済み");
+                *word = evaluate_shift_pins(
+                    &mut self.changes, self.nor.read_only(), &device.pins.data, device.output.start, *word,
+                );
                 return;
             }
             if let Some(base) = device.consecutive_tail {

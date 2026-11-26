@@ -9,40 +9,92 @@ use crate::fanout::Pin;
 
 verus! {
 
+/// 2番目以降の端子が、指定した配線から順に連続していることを表す。
+pub open spec fn consecutive_inputs(pins: Seq<Pin>, first: usize) -> bool {
+    &&& pins.len() > 1
+    &&& first as int + pins.len() - 2 <= usize::MAX
+    &&& forall|i: int| 1 <= i < pins.len() ==>
+        #[trigger] pins[i] == Pin::Slot((first as int + i - 1) as usize)
+}
+
 /// ラッチの先頭ビットを除く端子の連続性を検査し、確認できた範囲の先頭を返す。
 pub fn consecutive_tail(pins: &[Pin]) -> (start: Option<usize>)
     ensures
-        start matches Some(first) ==> pins@.len() > 1
-            && first as int + pins@.len() - 2 <= usize::MAX
-            && forall|i: int| 1 <= i < pins@.len() ==>
-                #[trigger] pins@[i] == Pin::Slot((first as int + i - 1) as usize),
+        forall|first: usize| #[trigger] consecutive_inputs(pins@, first)
+            <==> start == Some(first),
 {
     if pins.len() <= 1 {
         return None;
     }
     let Pin::Slot(first) = pins[1] else {
+        assert forall|base: usize| !#[trigger] consecutive_inputs(pins@, base) by {
+            if consecutive_inputs(pins@, base) {
+                assert(pins@[1] == Pin::Slot(base));
+            }
+        };
         return None;
     };
     if pins.len() - 2 > usize::MAX - first {
+        assert forall|base: usize| !#[trigger] consecutive_inputs(pins@, base) by {
+            if consecutive_inputs(pins@, base) {
+                assert(pins@[1] == Pin::Slot(base));
+            }
+        };
         return None;
     }
     let mut index = 2;
     while index < pins.len()
         invariant
             2 <= index <= pins@.len(),
+            pins@[1] == Pin::Slot(first),
             first as int + pins@.len() - 2 <= usize::MAX,
             forall|i: int| 1 <= i < index ==> #[trigger] pins@[i] == Pin::Slot((first as int + i - 1) as usize),
         decreases pins.len() - index,
     {
         let Pin::Slot(slot) = pins[index] else {
+            assert forall|base: usize| !#[trigger] consecutive_inputs(pins@, base) by {
+                if consecutive_inputs(pins@, base) {
+                    assert(pins@[index as int] is Slot);
+                }
+            };
             return None;
         };
         if slot != first + (index - 1) {
+            assert forall|base: usize| !#[trigger] consecutive_inputs(pins@, base) by {
+                if consecutive_inputs(pins@, base) {
+                    assert(pins@[1] == Pin::Slot(base));
+                    assert(pins@[index as int] == Pin::Slot((base as int + index - 1) as usize));
+                }
+            };
             return None;
         }
         index += 1;
     }
+    assert(consecutive_inputs(pins@, first));
+    assert forall|base: usize| #[trigger] consecutive_inputs(pins@, base) implies base == first by {
+        assert(pins@[1] == Pin::Slot(base));
+    };
     Some(first)
+}
+
+/// 連続配線の先頭と、ワードシフトで更新できるかを返す。
+///
+/// ラッチの出力区間の先頭を渡す。ワードシフトは連続比較も有効な場合に選ぶ。
+pub fn latch_input_layout(
+    pins: &[Pin], output_start: usize, lanes: bool, shift: bool,
+) -> (layout: (Option<usize>, bool))
+    ensures
+        forall|first: usize| layout.0 == Some(first)
+            <==> lanes && pins@.len() >= 9 && #[trigger] consecutive_inputs(pins@, first),
+        layout.1 <==> lanes && shift && 9 <= pins@.len() <= 64
+            && consecutive_inputs(pins@, output_start),
+{
+    let first = if lanes && pins.len() >= 9 { consecutive_tail(pins) } else { None };
+    let same_output = match first {
+        Some(first) => first == output_start,
+        None => false,
+    };
+    (first, shift && pins.len() <= 64 && same_output)
 }
 
 /// 8本の配線のうち、値が変わった配線のビットだけを1にする。
@@ -375,6 +427,102 @@ pub fn evaluate_shift_latch(
         assert(shifted_latch_updates(suffix, base, width, old_word, head));
     }
     Some(next)
+}
+
+/// キャッシュしたワードと確定済みのラッチ出力が一致することを表す。
+pub open spec fn word_matches_slots(word: u64, slots: Seq<bool>, base: usize, width: int) -> bool {
+    forall|lane: usize| lane < width ==> #[trigger] lane_set(word, lane) == slots[base + lane]
+}
+
+/// 実配線の各入力を旧状態から読み、出力が変わる箇所だけを順に選んだ列を表す。
+pub open spec fn latch_pin_updates(
+    updates: Seq<(usize, bool)>, slots: Seq<bool>, pins: Seq<Pin>, base: usize,
+) -> bool {
+    &&& forall|i: int| 0 <= i < updates.len() ==> {
+        let (slot, value) = #[trigger] updates[i];
+        &&& base <= slot < base + pins.len()
+        &&& value == pins[slot - base].value_model(slots)
+        &&& value != slots[slot as int]
+    }
+    &&& forall|lane: int| 0 <= lane < pins.len() ==> {
+        (pins[lane].value_model(slots) != slots[base + lane])
+            == #[trigger] updates.contains(((base + lane) as usize, pins[lane].value_model(slots)))
+    }
+    &&& forall|i: int, j: int| #![trigger updates[i], updates[j]]
+        0 <= i < j < updates.len() ==> updates[i].0 < updates[j].0
+}
+
+/// 自分の旧出力を1段ずらして読むラッチについて、実配線の確定候補と次のワードを求める。
+///
+/// 先頭の端子だけを値の列から読み、残りは評価前の出力と一致するワードを使う。
+/// 幅9〜64で、先頭以外が連続する旧出力を読むラッチに使う。呼び出し側はワードと
+/// 確定済み配線の一致を保ち、候補列に最大64件を追加できる添字の範囲を確保する。
+///
+/// # Panics
+///
+/// データ端子が空、または先頭端子が値の列の範囲外を指すとパニックする。
+#[inline]
+pub fn evaluate_shift_pins(
+    out: &mut Vec<(usize, bool)>, slots: &[bool], pins: &[Pin], base: usize, before: u64,
+) -> (next: u64)
+    requires
+        9 <= pins@.len() <= 64,
+        base as int + pins@.len() <= slots@.len(),
+        base as int + 63 <= usize::MAX,
+        old(out)@.len() + 64 <= usize::MAX,
+        pins@[0] matches Pin::Slot(slot) ==> slot < slots@.len(),
+        consecutive_inputs(pins@, base),
+        word_matches_slots(before, slots@, base, pins@.len() as int),
+    ensures
+        forall|lane: usize| lane < pins@.len() ==> #[trigger] lane_set(next, lane)
+            == pins@[lane as int].value_model(slots@),
+        exists|suffix: Seq<(usize, bool)>|
+            final(out)@ == old(out)@ + suffix && #[trigger] latch_pin_updates(suffix, slots@, pins@, base),
+{
+    let head = pins[0].read(slots);
+    let width = pins.len() as u32;
+    let Some(next) = evaluate_shift_latch(out, base, before, width, head) else {
+        proof { assert(false); }
+        return before;
+    };
+    proof {
+        assert forall|lane: usize| lane < pins@.len() implies
+            #[trigger] shift_input_at(before, head, lane) == pins@[lane as int].value_model(slots@) by {
+            if lane > 0 {
+                assert(pins@[lane as int] == Pin::Slot((base as int + lane - 1) as usize));
+                assert(lane_set(before, (lane - 1) as usize) == slots@[base + lane - 1]);
+            }
+        };
+        assert forall|lane: usize| lane < pins@.len() implies #[trigger] lane_set(next, lane)
+            == pins@[lane as int].value_model(slots@) by {
+            assert(lane_set(next, lane) == shift_input_at(before, head, lane));
+        };
+        let suffix = choose|suffix: Seq<(usize, bool)>|
+            out@ == old(out)@ + suffix && #[trigger] shifted_latch_updates(suffix, base, width, before, head);
+        assert forall|i: int| 0 <= i < suffix.len() implies {
+            let (slot, value) = #[trigger] suffix[i];
+            &&& base <= slot < base + pins@.len()
+            &&& value == pins@[slot - base].value_model(slots@)
+            &&& value != slots@[slot as int]
+        } by {
+            let (slot, value) = suffix[i];
+            let lane = (slot - base) as usize;
+            assert(value == shift_input_at(before, head, lane));
+            assert(lane_set(before, lane) == slots@[slot as int]);
+        };
+        assert forall|lane: int| 0 <= lane < pins@.len() implies {
+            (pins@[lane].value_model(slots@) != slots@[base + lane])
+                == #[trigger] suffix.contains(((base + lane) as usize, pins@[lane].value_model(slots@)))
+        } by {
+            let lane_u = lane as usize;
+            assert(shift_input_at(before, head, lane_u) == pins@[lane].value_model(slots@));
+            assert(lane_set(before, lane_u) == slots@[base + lane]);
+            assert((shift_input_at(before, head, lane_u) != lane_set(before, lane_u))
+                == suffix.contains(((base + lane_u) as usize, shift_input_at(before, head, lane_u))));
+        };
+        assert(latch_pin_updates(suffix, slots@, pins@, base));
+    }
+    next
 }
 
 } // verus!
