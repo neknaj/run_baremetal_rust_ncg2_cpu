@@ -35,6 +35,8 @@ CPU は STATUS を読み、エラービットを優先する。エラーがな�
 
 `verify-uart-ram` は、任意の内部状態と、安定させた任意のアドレスに対する書き込み要求から、RAM の入口に届く許可とアドレス・データが参照仕様と一致することを検証する。VM の試験では、バンク境界の語、添字が一周する位置、無効なアドレス、連続した書き込みの確定時刻を確認する。
 
+回路の照合では、Core が展開した配線を SMT-LIB へ写す検証器と Z3 を信頼する。CPU が任意の命令列で32 tick のアドレス保持条件を満たすことは、RAM 単体の検証範囲に含まれない。
+
 ## ROM の更新と検証
 
 通常の実行では `circuit/uart-boot-rom.ncg2` を使う。アセンブリを変更したときは GNU binutils で組み立て直し、命令バイトを ROM に変換する。
@@ -62,4 +64,17 @@ cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
   -- target/verification/uart-boot.bin > "$model"
 test "$(z3 -smt2 "$model")" = unsat
 test "$(z3 -smt2 verification/uart_boot_bounds.smt2)" = "$(printf 'unsat\nunsat')"
+```
+
+## UART からアプリを起動する結合試験
+
+`uart-boot.toml` の入口は `::rv64::uart-system`。入力は UART の `rx` と64ビットの観測アドレスである。CPU が命令フェッチやメモリアクセスをしていない間に、観測アドレスがデータポートへ届く。公開出力は物理 PC、バスアドレス、読み出し値、受信の有効性とエラー、命令の完了と停止、書き込み許可の順に並ぶ。
+
+次の試験は語数と2語の機械語を UART の 8N1 波形で送る。ROM が受信語を消費し、RAM から起動したアプリが観測先へ42を書き込むことを確かめる。全書き込みで直前32 tick のアドレスの保持を検査する。標準 VM と疎実行器の公開出力は、リセットから結果を読み出すまで毎 tick 比較し、最後にプログラム用 RAM の内容を照合する。
+
+```sh
+ncg2 check --project uart-boot.toml
+host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+cargo +1.99.1 test --release --locked --manifest-path verification/Cargo.toml \
+  --target "$host" --test uart_system
 ```

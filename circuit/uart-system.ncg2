@@ -1,0 +1,16 @@
+(namespace rv64
+  (export uart-system)
+
+  ;; 観測アドレスは CPU が命令やデータでポートを使っていない期間に選ばれる。
+  (module uart-system
+    (in rx (probe-address (bits 64)))
+    (out (pc (bits 64)) (bus-address (bits 64)) (bus-read-data (bits 64))
+         uart-ready uart-error commit stopped bus-write)
+    (def (pc bus-address write-data bus-write register-data register-enable commit stopped)
+      (uart-firmware-machine probe-address bus-read-data))
+    (def ram-data (uart-ram bus-address write-data bus-write))
+    (def (uart-data uart-ready uart-error) (uart-boot-mmio rx bus-address bus-write))
+    ;; RAM の全領域で下位側のビット21は0。UART のポートはビット21が1の領域にある。
+    ;; 各ポートは選んだ側の範囲外アドレスにゼロを返す。
+    (def from-uart (bit bus-address 21))
+    (def bus-read-data (::rv64::arithmetic::select from-uart ram-data uart-data))))
