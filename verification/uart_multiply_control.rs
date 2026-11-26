@@ -4,6 +4,46 @@ use vstd::prelude::*;
 
 verus! {
 
+/// 乗算と除算の完了を OR で合流させたときの退役・次命令発行を合成する。
+///
+/// 合流の2 tick は実配線の構造検査で、退役までの遅延は
+/// `firmware-retire` の展開済み回路で調べる。
+pub proof fn shared_completion_timing(
+    simple: spec_fn(int) -> bool,
+    multiply_finished: spec_fn(int) -> bool,
+    divide_finished: spec_fn(int) -> bool,
+    long_finished: spec_fn(int) -> bool,
+    valid: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+    seed: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+)
+    requires
+        forall|t: int| t >= 2 ==> #[trigger] long_finished(t)
+            == (multiply_finished(t - 2) || divide_finished(t - 2)),
+        forall|t: int| t >= 6 ==> #[trigger] commit(t)
+            == ((simple(t - 6) || long_finished(t - 6)) && valid(t - 3)),
+        forall|t: int| t >= 4 ==> #[trigger] issue(t) == (seed(t - 3) || commit(t - 3)),
+    ensures
+        forall|t: int| t >= 8 ==> #[trigger] commit(t)
+            == ((simple(t - 6) || multiply_finished(t - 8) || divide_finished(t - 8))
+                && valid(t - 3)),
+        forall|t: int| t >= 11 ==> #[trigger] issue(t)
+            == (seed(t - 3) || (simple(t - 9) || multiply_finished(t - 11) || divide_finished(t - 11))
+                && valid(t - 6)),
+{
+    assert forall|t: int| t >= 8 implies #[trigger] commit(t)
+        == ((simple(t - 6) || multiply_finished(t - 8) || divide_finished(t - 8))
+            && valid(t - 3)) by {
+        assert(long_finished(t - 6) == (multiply_finished(t - 8) || divide_finished(t - 8)));
+    };
+    assert forall|t: int| t >= 11 implies #[trigger] issue(t)
+        == (seed(t - 3) || (simple(t - 9) || multiply_finished(t - 11) || divide_finished(t - 11))
+            && valid(t - 6)) by {
+        assert(t - 3 >= 8);
+    };
+}
+
 /// 立ち上がり通知までの遅延、取り込みがないときの保持、反復開始に必要な条件。
 /// 反復には running も必要だが、ここではその値を任意にして証明する。
 pub open spec fn multiply_control(
