@@ -23,13 +23,14 @@ header:
     bltu t2, t4, boot_error
     sd zero, 16(t0)
 
+    # ヘッダの語数検査が終わったので、t2 を正常な STATUS の値1に切り替える。
+    addi t2, zero, 1
+
     # DATA は ACK を書くまで同じ語を返す。SRAM への書き込み要求を発行した後で、受信語を消費する。
 payload:
     ld t3, 0(t0)
-    andi t6, t3, 2
-    bne t6, zero, boot_error
-    andi t3, t3, 1
     beq t3, zero, payload
+    bne t3, t2, boot_error
     ld t5, 8(t0)
     sd t5, 0(t1)
     sd zero, 16(t0)

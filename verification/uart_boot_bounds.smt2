@@ -16,6 +16,7 @@
 (pop)
 
 ; i 語を送った時点で t4=count-i、t1=app-first+8*i。
+(push)
 (assert legal-count)
 (assert (bvult transferred count))
 (define-fun address () (_ BitVec 64) (bvadd app-first (bvmul transferred eight)))
@@ -33,3 +34,26 @@
             (distinct next-address (bvadd app-first (bvmul next-transferred eight)))
             (distinct (= next-remaining zero) (= next-transferred count))))
 (check-sat)
+(pop)
+
+; STATUS の上位62ビットは展開済み UART MMIO の検証で0と分かる。
+; 0を待機、1を読出し、2を停止を表す結果とする。
+(push)
+(declare-const status (_ BitVec 64))
+(assert (= ((_ extract 63 2) status) (_ bv0 62)))
+(define-fun wait-result () (_ BitVec 2) #b00)
+(define-fun read-result () (_ BitVec 2) #b01)
+(define-fun halt-result () (_ BitVec 2) #b10)
+(define-fun old-action () (_ BitVec 2)
+    (ite (distinct (bvand status (_ bv2 64)) zero)
+        halt-result
+        (ite (= (bvand status one) zero) wait-result read-result)))
+(define-fun new-action () (_ BitVec 2)
+    (ite (= status zero) wait-result (ite (distinct status one) halt-result read-result)))
+(define-fun reference-action () (_ BitVec 2)
+    (ite (= ((_ extract 1 1) status) #b1)
+        halt-result
+        (ite (= ((_ extract 0 0) status) #b1) read-result wait-result)))
+(assert (or (distinct old-action reference-action) (distinct new-action reference-action)))
+(check-sat)
+(pop)

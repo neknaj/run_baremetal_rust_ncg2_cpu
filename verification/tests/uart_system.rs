@@ -27,6 +27,7 @@ fn boots_two_words_sent_as_uart_frames_and_observes_the_application_store() {
     let mut ticks = 0;
     let mut last_address = 0;
     let mut address_ticks = 0;
+    let mut writes = Vec::new();
     let mut tick = |rx: bool| {
         ticks += 1;
         input[0] = rx;
@@ -40,6 +41,7 @@ fn boots_two_words_sent_as_uart_frames_and_observes_the_application_store() {
             address_ticks = 1;
         }
         if output[BUS_WRITE] {
+            writes.push(address);
             assert!(address_ticks >= 32, "tick {ticks}, 書き込み先 {address:#x}");
         }
         assert!(
@@ -82,6 +84,17 @@ fn boots_two_words_sent_as_uart_frames_and_observes_the_application_store() {
         .unwrap();
     let standard_ram = reference.ram_memory(bank).unwrap();
     assert_eq!(event.ram_memory(bank).unwrap(), standard_ram);
+    assert_eq!(
+        writes,
+        [0x200010, 0x10000, 0x200010, 0x10008, 0x200010, PROBE]
+    );
+    for (address, value) in [
+        (0x10000, 0x02a0_0313_0001_02b7),
+        (0x10008, 0x0000_006f_0262_b023),
+    ] {
+        let start = ((address >> 3) & 0x7fff) * 64;
+        assert_eq!(word(&standard_ram[start..start + 64]), value);
+    }
     let start = ((PROBE as usize >> 3) & 0x7fff) * 64;
     assert_eq!(word(&standard_ram[start..start + 64]), 42);
     eprintln!("RAM から起動して結果を読み出した tick: {ticks}");
