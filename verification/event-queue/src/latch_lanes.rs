@@ -1,6 +1,9 @@
 //! 連続して配線されたラッチ入力の変更箇所をまとめて調べる。
 
+use alloc::vec::Vec;
 use vstd::prelude::*;
+#[cfg(verus_only)]
+use vstd::{seq_lib::lemma_seq_contains_after_push, std_specs::bits::axiom_u64_trailing_zeros};
 
 use crate::fanout::Pin;
 
@@ -118,6 +121,151 @@ pub fn shift_latch_word(old: u64, width: u32, head: bool) -> (result: Option<(u6
         assert(i < width ==> (next >> i) & 1 == if i == 0 { head_bit } else { (old >> ((i - 1) as u32)) & 1 });
     };
     Some((next, changed))
+}
+
+
+/// 変更マスクから最小の添字を取り出し、更新後の値と組にする。
+///
+/// マスクが空の場合は None を返す。成功した場合は取り出したビットだけを消す。
+#[inline]
+pub fn take_latch_change(mask: &mut u64, next: u64) -> (result: Option<(usize, bool)>)
+    ensures
+        result.is_none() <==> *old(mask) == 0,
+        result.is_none() ==> *final(mask) == *old(mask),
+        result matches Some((lane, value)) ==> {
+            &&& lane < 64
+            &&& (*old(mask) >> lane) & 1 == 1
+            &&& forall|i: usize| i < lane ==> (#[trigger] (*old(mask) >> i) & 1) == 0
+            &&& value == ((next >> lane) & 1 != 0)
+            &&& *final(mask) == *old(mask) & !(1u64 << lane)
+            &&& *final(mask) < *old(mask)
+        },
+{
+    let before = *mask;
+    if before == 0 {
+        return None;
+    }
+    let lane = before.trailing_zeros() as usize;
+    proof {
+        axiom_u64_trailing_zeros(before);
+        assert(lane < 64);
+        assert((before >> lane) & 1 == 1) by(bit_vector)
+            requires (before >> lane as u64) & 1 == 1;
+        assert forall|i: usize| i < lane implies (#[trigger] (before >> i) & 1) == 0 by {
+            assert((before >> i as u64) & 1 == 0);
+        };
+    }
+    let remaining = before & !(1u64 << lane);
+    assert(remaining < before) by(bit_vector)
+        requires lane < 64, remaining == before & !(1u64 << lane), (before >> lane) & 1 == 1;
+    *mask = remaining;
+    Some((lane, (next >> lane) & 1 != 0))
+}
+
+
+/// ワードの指定ビットを読む。呼び出し側は0から63までの添字を使う。
+pub open spec fn lane_set(word: u64, lane: usize) -> bool {
+    ((word >> lane) & 1) != 0
+}
+
+/// ワードの変更を、配線添字で昇順に並べた変更列として表す。
+pub open spec fn shift_changes(
+    changes: Seq<(usize, bool)>, base: usize, next: u64, mask: u64,
+) -> bool {
+    &&& forall|i: int| 0 <= i < changes.len() ==> {
+        let change = #[trigger] changes[i];
+        &&& base <= change.0
+        &&& change.0 - base < 64
+        &&& lane_set(mask, (change.0 - base) as usize)
+        &&& change.1 == lane_set(next, (change.0 - base) as usize)
+    }
+    &&& forall|lane: usize| lane < 64 ==>
+        #[trigger] lane_set(mask, lane)
+        == changes.contains(((base + lane) as usize, lane_set(next, lane)))
+    &&& forall|i: int, j: int| #![trigger changes[i], changes[j]] 0 <= i < j < changes.len() ==>
+        changes[i].0 < changes[j].0
+}
+
+/// 既存の確定候補を保ち、変更マスクの配線を添字の昇順に追加する。
+///
+/// # Panics
+///
+/// 呼び出し側は、配線の先頭から63を加算でき、候補の列に最大64件を追加できる範囲の
+/// 添字を渡す。実行器は構築時に確保した配線の範囲と候補の列を使う。
+#[inline]
+pub fn append_shift_changes(out: &mut Vec<(usize, bool)>, base: usize, next: u64, mask: u64)
+    requires
+        base as int + 63 <= usize::MAX,
+        old(out)@.len() + 64 <= usize::MAX,
+    ensures
+        exists|suffix: Seq<(usize, bool)>|
+            final(out)@ == old(out)@ + suffix && shift_changes(suffix, base, next, mask),
+{
+    let mut remaining = mask;
+    let ghost mut added: Seq<(usize, bool)> = Seq::empty();
+    let ghost mut floor: usize = 0;
+    while remaining != 0
+        invariant
+            base as int + 63 <= usize::MAX,
+            old(out)@.len() + 64 <= usize::MAX,
+            out@ == old(out)@ + added,
+            added.len() <= floor <= 64,
+            forall|i: int| 0 <= i < added.len() ==> {
+                let entry = #[trigger] added[i];
+                &&& base <= entry.0
+                &&& entry.0 - base < floor
+                &&& lane_set(mask, (entry.0 - base) as usize)
+                &&& entry.1 == lane_set(next, (entry.0 - base) as usize)
+            },
+            forall|i: int, j: int| #![trigger added[i], added[j]] 0 <= i < j < added.len() ==> added[i].0 < added[j].0,
+            forall|lane: usize| lane < floor ==> !#[trigger] lane_set(remaining, lane),
+            forall|lane: usize| lane < 64 ==> #[trigger] lane_set(mask, lane)
+                == (lane_set(remaining, lane)
+                    || added.contains(((base + lane) as usize, lane_set(next, lane)))),
+        decreases remaining,
+    {
+        let ghost before = remaining;
+        let (lane, value) = take_latch_change(&mut remaining, next).unwrap();
+        assert(lane_set(before, lane));
+        assert(lane >= floor);
+        let update = (base + lane, value);
+        let ghost prefix = added;
+        out.push(update);
+        proof {
+            added = added.push(update);
+            floor = (lane + 1) as usize;
+            assert(out@ =~= old(out)@ + added);
+            assert forall|i: usize| i < 64 implies
+                lane_set(remaining, i) == (i != lane && lane_set(before, i))
+            by {
+                assert(((remaining >> i) & 1 != 0) == (i != lane && ((before >> i) & 1 != 0)))
+                    by(bit_vector)
+                    requires i < 64, lane < 64, remaining == before & !(1u64 << lane);
+            };
+            assert forall|i: usize| i < floor implies !#[trigger] lane_set(remaining, i) by {
+                if i < lane {
+                    assert((before >> i) & 1 == 0);
+                }
+            };
+            assert forall|i: usize| i < 64 implies #[trigger] lane_set(mask, i)
+                == (lane_set(remaining, i)
+                    || added.contains(((base + i) as usize, lane_set(next, i))))
+            by {
+                let entry = ((base + i) as usize, lane_set(next, i));
+                lemma_seq_contains_after_push(prefix, update, entry);
+                assert(entry == update <==> i == lane);
+                assert(lane_set(mask, i)
+                    == (lane_set(before, i) || prefix.contains(entry)));
+            };
+        }
+    }
+    assert forall|lane: usize| lane < 64 implies #[trigger] lane_set(mask, lane)
+        == added.contains(((base + lane) as usize, lane_set(next, lane)))
+    by {
+        assert(((remaining >> lane) & 1) == 0) by(bit_vector) requires remaining == 0, lane < 64;
+        assert(!lane_set(remaining, lane));
+    };
+    assert(shift_changes(added, base, next, mask));
 }
 
 } // verus!
