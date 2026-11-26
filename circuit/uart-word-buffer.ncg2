@@ -1,0 +1,104 @@
+(namespace rv64
+  (export uart-word-buffer)
+
+  (latch word-bit (width 1))
+  (latch word-count (width 3))
+  (latch word-delay-3 (width 3))
+  (latch word-delay-4 (width 4))
+  (latch word-delay-7 (width 7))
+  (latch word-delay-9 (width 9))
+  (latch word-register (width 64))
+
+  (func word-xor
+    (in left right)
+    (out result)
+    (def either-low (nor left right))
+    (def left-only (nor left either-low))
+    (def right-only (nor right either-low))
+    (def both-same (nor left-only right-only))
+    (def result (nor both-same both-same)))
+
+  ;; valid の立つ tick に1バイトを採取する。最初の valid と以後の valid 間隔は16 tick 以上。
+  ;; 採取順の8バイトをリトルエンディアンの1語にする。入力 tick t の効果は t+12 に公開する。
+  ;; ACK は tick 開始時の公開 ready が1なら受け付ける。受け付けた ACK と8バイト目が重なれば新語を残す。
+  ;; ACK なしで保持中に次の語が完成すれば、旧語を保って error を立てる。
+  ;; framing-error でも error が立つ。error は reset まで保持する。
+  (module uart-word-buffer
+    (in (byte (bits 8)) valid framing-error ack)
+    (out (word (bits 64)) ready error)
+
+    ;; 起動直後、逆極性の NOR を含む回路が落ち着いてから通知を通す。
+    (def arm-tail (slice arm-delay 0 3))
+    (def arm-data (concat 1 arm-tail))
+    (def arm-delay (word-delay-4 arm-data 1))
+    (def armed (slice arm-delay 3 1))
+
+    ;; 最後に採取したバイトは最上位へ入る。8個そろうと最初のバイトが最下位にある。
+    (def shifted (slice collected 8 56))
+    (def next-bytes (concat shifted byte))
+    (def collected (word-register next-bytes valid))
+    (def count-0 (slice count 0 1))
+    (def count-1 (slice count 1 1))
+    (def count-2 (slice count 2 1))
+    (def low (nor count-0 count-0))
+    (def not-middle (nor count-1 count-1))
+    (def carry (nor low not-middle))
+    (def middle (word-xor count-1 count-0))
+    (def high (word-xor count-2 carry))
+    (def next-count (concat low middle high))
+    (def count (word-count next-count valid))
+    (def not-carry (nor carry carry))
+    (def not-high (nor count-2 count-2))
+    (def last (nor not-carry not-high))
+    (def not-last (nor last last))
+    (def not-valid (nor valid valid))
+    (def complete-candidate (nor not-valid not-last))
+    (def complete (word-bit complete-candidate armed))
+
+    ;; tick の開始時に公開済みの ready と ACK を読み、完成と同じ段にそろえる。
+    (def was-absent (nor ready ready))
+    (def no-ack (nor ack ack))
+    (def ack-present (nor was-absent no-ack))
+    (def consume (word-bit ack-present armed))
+    ;; 完成と消費が重なる場合にも、更新後は新しい語が ready になる。
+    (def no-ready-change (nor complete consume))
+    (def ready-update (nor no-ready-change no-ready-change))
+    (def complete-tail (slice complete-delay 0 2))
+    (def complete-data (concat complete complete-tail))
+    (def complete-delay (word-delay-3 complete-data 1))
+    (def ready-next (slice complete-delay 1 1))
+    (def occupied (word-bit ready-next ready-update))
+    (def occupied-tail (slice ready-delay 0 6))
+    (def occupied-data (concat occupied occupied-tail))
+    (def ready-delay (word-delay-7 occupied-data 1))
+    (def ready (slice ready-delay 6 1))
+
+    ;; 旧 ready と同じ入力 tick の ACK を読む。既存語を消費できるときだけ上書きする。
+    (def consume-tail (slice consume-delay 0 2))
+    (def consume-data (concat consume consume-tail))
+    (def consume-delay (word-delay-3 consume-data 1))
+    (def consume-late (slice consume-delay 2 1))
+    (def was-free (nor occupied occupied))
+    (def blocked (nor was-free consume-late))
+    (def not-blocked (nor blocked blocked))
+    (def complete-late (slice complete-delay 2 1))
+    (def not-complete-late (nor complete-late complete-late))
+    (def not-complete-error (word-bit not-complete-late 1))
+    (def publish (nor not-complete-late blocked))
+    (def overrun (nor not-complete-error not-blocked))
+
+    ;; 語の更新を ready と error の確定 tick にそろえる。
+    (def publish-tail (slice publish-delay 0 3))
+    (def publish-data (concat publish publish-tail))
+    (def publish-delay (word-delay-4 publish-data 1))
+    (def write-word (slice publish-delay 3 1))
+    (def word (word-register collected write-word))
+
+    (def framing-tail (slice framing-delay 0 8))
+    (def framing-data (concat framing-error framing-tail))
+    (def framing-delay (word-delay-9 framing-data 1))
+    (def framing-late (slice framing-delay 8 1))
+    (def no-failure (nor overrun framing-late))
+    (def failure (nor no-failure no-failure))
+    (def mark-error (word-bit failure armed))
+    (def error (word-bit 1 mark-error))))
