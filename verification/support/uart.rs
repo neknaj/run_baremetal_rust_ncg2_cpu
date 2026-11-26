@@ -17,6 +17,31 @@ use circuitgame2_core::{
 /// UART 波形の1ビットを保持する tick 数。
 pub const BIT_TICKS: usize = 16;
 
+/// 連続転送の波形と実受信回路に共通のビット周期。
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub enum ContinuousRate {
+    Standard,
+    Fast,
+}
+
+impl ContinuousRate {
+    /// 8N1 の各ビットを一定に保つ tick 数。
+    pub fn bit_ticks(self) -> usize {
+        match self {
+            Self::Standard => BIT_TICKS,
+            Self::Fast => 8,
+        }
+    }
+
+    fn receiver(self) -> &'static str {
+        match self {
+            Self::Standard => "uart-loader-receive",
+            Self::Fast => "uart-loader-receive-8",
+        }
+    }
+}
+
 /// プロジェクトの公開ポートを照合し、検証に使う VM を組み立てる。
 pub fn machine(path: &Path) -> Result<ClockedVm, Box<dyn Error>> {
     lower_project(path, "uart-system", "uart-system", &[("rx", 1), ("probe-address", 64)],
@@ -30,7 +55,9 @@ pub fn machine(path: &Path) -> Result<ClockedVm, Box<dyn Error>> {
 ///
 /// 設定、展開済み配線、または公開ポートの順序と幅が実行器の契約を満たさない場合に返す。
 #[allow(dead_code)]
-pub fn continuous_machines(path: &Path) -> Result<(ClockedVm, ClockedVm), Box<dyn Error>> {
+pub fn continuous_machines(
+    path: &Path, rate: ContinuousRate,
+) -> Result<(ClockedVm, ClockedVm), Box<dyn Error>> {
     let entry = "uart-loader-handoff";
     let handoff = lower_project(
         path, entry, entry,
@@ -40,7 +67,7 @@ pub fn continuous_machines(path: &Path) -> Result<(ClockedVm, ClockedVm), Box<dy
           ("issue", 1), ("commit", 1), ("stopped", 1), ("bus-write", 1)],
     )?;
     let receiver = lower_project(
-        path, entry, "uart-loader-receive",
+        path, entry, rate.receiver(),
         &[("rx", 1), ("ack", 1)],
         &[("word", 64), ("ready", 1), ("error", 1)],
     )?;
@@ -143,19 +170,19 @@ pub fn word(bits: &[bool]) -> u64 {
 }
 
 /// 8N1 の開始、データ、停止ビットを物理 RX の tick に広げる。
-pub fn waveform(bytes: [u8; 8]) -> impl Iterator<Item = bool> {
-    bytes.into_iter().flat_map(|byte| {
+pub fn waveform(bytes: [u8; 8], rate: ContinuousRate) -> impl Iterator<Item = bool> {
+    bytes.into_iter().flat_map(move |byte| {
         std::iter::once(false)
             .chain((0..8).map(move |bit| (byte >> bit) & 1 != 0))
             .chain(std::iter::once(true))
-            .flat_map(|level| std::iter::repeat_n(level, BIT_TICKS))
+            .flat_map(move |level| std::iter::repeat_n(level, rate.bit_ticks()))
     })
 }
 
 /// 受信語の有効性が立ってから消費されるまで、RX をアイドルに保つ。
 pub fn send<E>(bytes: [u8; 8], mut tick: impl FnMut(bool) -> Result<bool, E>) -> Result<bool, E> {
     let mut ready = false;
-    for level in waveform(bytes) {
+    for level in waveform(bytes, ContinuousRate::Standard) {
         ready |= tick(level)?;
     }
     for _ in 0..20_000 {

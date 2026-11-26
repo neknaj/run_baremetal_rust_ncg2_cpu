@@ -135,9 +135,11 @@ cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
 
 転送と RAM の照合だけを測る場合は、同じ実行ファイルを `--measure-continuous uart-loader.toml selfhost/target/compile-uart.bin 33778` で起動する。先頭区間を測る場合は最後の語数を減らす。送信するヘッダーには元の全語数が入るため、その場合は CPU への引き渡しまで進まない。
 
-上の33,778語を送った Windows の release 計測では、最後の RAM 書き込みが tick 43,237,191、CPU への引き渡しが tick 43,237,192 だった。送信開始から全語の RAM 照合までに16.216秒かかった。回路の構築と引き渡し後の実行は別に計測する。連続転送で表示するアプリの tick 数は RAM を引き渡した時点から数える。[計測条件と比較](https://github.com/neknaj/run_baremetal_rust_ncg2_cpu/wiki/UART-performance)
+8 tick/bit を選ぶには、実行コマンドの `--continuous` を `--continuous-8` に替える。転送のみの計測では `--measure-continuous-8` を指定する。送るデータと QEMU ログは共通で、送信波形と受信回路の両方の周期が変わる。[UART の受信時刻](uart-rx.md)
 
-先頭1,600 tick の CPU・RAM 回路と先頭5,120 tick の受信器については、公開出力を標準 VM と毎 tick 照合する。以降は疎実行器で進め、受信語、RAM に確定した内容、CPU への引き渡しを検査する。FIFO の契約と切り替え回路の有界 SMT 検査は、この全量走行の検査と併用する。
+上の33,778語を送った Windows の release 計測では、最後の RAM 書き込みが tick 43,237,191、CPU への引き渡しが tick 43,237,192 だった。送信開始から全語の RAM 照合までに16.216秒かかった。8 tick/bit では引き渡しは tick 21,618,640 で、RAM 照合までに12.471秒と13.325秒を計測した。回路の構築と引き渡し後の実行は別に計測する。連続転送で表示するアプリの tick 数は RAM を引き渡した時点から数える。[計測条件と比較](https://github.com/neknaj/run_baremetal_rust_ncg2_cpu/wiki/UART-performance)
+
+CPU・RAM 回路の先頭1,600 tick と、受信器の先頭5,120 tick（8 tick/bit では2,560 tick）では公開出力を標準 VM と毎 tick 照合する。以降は疎実行器で進め、受信語、RAM に確定した内容、CPU への引き渡しを検査する。FIFO の契約と切り替え回路の有界 SMT 検査は、この全量走行の検査と併用する。
 
 ### 回路ソースと入力を指定する
 

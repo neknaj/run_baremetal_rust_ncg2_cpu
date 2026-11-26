@@ -8,6 +8,7 @@ use ncg2_rv64_arithmetic_proof::event_clocked::EventVm;
 
 #[path = "../support/uart.rs"]
 mod uart;
+use uart::ContinuousRate;
 
 const ENTRY: u64 = 0x10000;
 const HALT: u64 = 0x10068;
@@ -239,8 +240,10 @@ fn flash(machine: &mut Machine, words: &[[u8; 8]]) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-fn continuous_setup(path: &Path, limit: u64) -> Result<(Machine, ClockedVm), Box<dyn Error>> {
-    let (handoff, receiver) = uart::continuous_machines(path)?;
+fn continuous_setup(
+    path: &Path, limit: u64, rate: ContinuousRate,
+) -> Result<(Machine, ClockedVm), Box<dyn Error>> {
+    let (handoff, receiver) = uart::continuous_machines(path, rate)?;
     Ok((Machine::new(handoff, limit, true)?, receiver))
 }
 
@@ -265,6 +268,7 @@ fn flash_continuous(
     mut receiver_reference: ClockedVm,
     words: &[[u8; 8]],
     complete: bool,
+    rate: ContinuousRate,
 ) -> Result<(), Box<dyn Error>> {
     let mut receiver = EventVm::new(&receiver_reference)?;
     if receiver.reset() != receiver_reference.reset() {
@@ -277,9 +281,10 @@ fn flash_continuous(
     let mut expected_writes = VecDeque::new();
     let mut pending_writes = VecDeque::new();
     let banks = (machine.storage_index(15)?, machine.storage_index(10)?);
-    let waveform_ticks = (uart::BIT_TICKS * (1 + 80 * words.len())) as u64;
+    let bit_ticks = rate.bit_ticks();
+    let waveform_ticks = (uart::BIT_TICKS + bit_ticks * 80 * words.len()) as u64;
     let waveform = std::iter::repeat_n(true, uart::BIT_TICKS)
-        .chain(words.iter().copied().flat_map(uart::waveform))
+        .chain(words.iter().copied().flat_map(|bytes| uart::waveform(bytes, rate)))
         .chain(std::iter::repeat_n(true, 96));
     let started = Instant::now();
     let mut wire_elapsed = None;
@@ -312,7 +317,7 @@ fn flash_continuous(
         acknowledged = previous[64] && (acknowledged || ack);
         let receiver_input = [rx, ack];
         let output = receiver.step(&receiver_input).map_err(|error| format!("UART 受信器: {error:?}"))?;
-        if tick <= STANDARD_TICKS.max(4 * uart::BIT_TICKS as u64 * 80)
+        if tick <= STANDARD_TICKS.max(4 * bit_ticks as u64 * 80)
             && receiver_reference.step(&receiver_input).map_err(|error| format!("UART 受信器の標準 VM: {error:?}"))? != output
         {
             return Err(format!("tick {tick}: UART 受信器の公開出力が標準 VM と異なる。").into());
@@ -376,7 +381,7 @@ fn flash_continuous(
             }
             let elapsed = started.elapsed().as_secs_f64();
             let wire_seconds = wire_elapsed.ok_or("UART の波形終了時刻がない。")?.as_secs_f64();
-            println!("UART の波形終了 {waveform_ticks} tick、経過 {wire_seconds:.6} s");
+            println!("UART の波形終了 {waveform_ticks} tick、{bit_ticks} tick/bit、経過 {wire_seconds:.6} s");
             println!("最後の物理 RAM 確定 {last_ram_tick} tick");
             if let Some(finished) = loader_finished {
                 println!("ローダーの完了 {finished} tick、CPU への引き渡し {tick} tick");
@@ -447,8 +452,13 @@ fn verify_execution(
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     if let [flag, project, image, count] = arguments.as_slice()
-        && flag == "--measure-continuous"
+        && (flag == "--measure-continuous" || flag == "--measure-continuous-8")
     {
+        let rate = if flag == "--measure-continuous-8" {
+            ContinuousRate::Fast
+        } else {
+            ContinuousRate::Standard
+        };
         let bytes = fs::read(image)?;
         let words = image_words(&bytes)?;
         let count: usize = count.to_str().ok_or("先頭語数を十進整数で指定する。")?.parse()?;
@@ -456,12 +466,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("先頭語数が転送データの範囲外。".into());
         }
         let setup = Instant::now();
-        let (mut machine, receiver) = continuous_setup(Path::new(project), u64::MAX)?;
+        let (mut machine, receiver) = continuous_setup(Path::new(project), u64::MAX, rate)?;
         println!("回路を構築 {:.6} s", setup.elapsed().as_secs_f64());
-        return flash_continuous(&mut machine, receiver, &words[..=count], count == words.len() - 1);
+        return flash_continuous(&mut machine, receiver, &words[..=count], count == words.len() - 1, rate);
     }
-    let continuous = arguments.first().is_some_and(|flag| flag == "--continuous");
-    let args = if continuous { &arguments[1..] } else { &arguments[..] };
+    let rate = match arguments.first() {
+        Some(flag) if flag == "--continuous" => Some(ContinuousRate::Standard),
+        Some(flag) if flag == "--continuous-8" => Some(ContinuousRate::Fast),
+        _ => None,
+    };
+    let args = if rate.is_some() { &arguments[1..] } else { &arguments[..] };
     let (project, image, log, expected, limit) = match args {
         [project, image, log, info, limit] => {
             let info = u64::from_str_radix(
@@ -486,11 +500,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let image = fs::read(image)?;
     let words = image_words(&image)?;
     let reference = reference_pcs(Path::new(log))?;
-    let mut machine = if continuous {
+    let mut machine = if let Some(rate) = rate {
         let setup = Instant::now();
-        let (mut machine, receiver) = continuous_setup(Path::new(project), limit)?;
+        let (mut machine, receiver) = continuous_setup(Path::new(project), limit, rate)?;
         println!("回路を構築 {:.6} s", setup.elapsed().as_secs_f64());
-        flash_continuous(&mut machine, receiver, words, true)?;
+        flash_continuous(&mut machine, receiver, words, true, rate)?;
         machine
     } else {
         let mut machine = Machine::new(uart::machine(Path::new(project))?, limit, false)?;
