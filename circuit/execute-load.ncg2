@@ -31,7 +31,5 @@
 
     ;; 加算器は64ビットを越えた桁を捨てる。メモリマップは8バイト整列も検査する。
     (def address (::rv64::arithmetic::add rs1-value immediate-i))
-    (def (rom bss stack rom-word bss-word stack-word) (firmware-data-map address))
-    (def in-ram (execute-or bss stack))
-    (def readable (execute-or rom in-ram))
+    (def (readable writable) (firmware-data-access address))
     (def valid (execute-and is-ld readable))))

@@ -168,9 +168,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-boot" => (224, 264),
         "execute-control" => (224, 136),
         "execute-load" => (96, 71),
-        "execute-logic" => (160, 66),
+        "execute-logic" => (160, 67),
         "mul-round" => (386, 257),
-        "firmware-dispatch" => (417, 265),
+        "firmware-dispatch" => (417, 266),
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
         "firmware-data-map" => (64, 28),
@@ -257,6 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("(define-fun rs2 () (_ BitVec 64) {rs2})");
             println!("(define-fun recognized () Bool {})", name(outputs[0]));
             println!("(define-fun multiply () Bool {})", name(outputs[1]));
+            println!("(define-fun high-product () Bool {})", name(outputs[66]));
             println!("(define-fun result () (_ BitVec 64) {result})");
             print!("{}", include_str!("execute_logic.smt2"));
         }

@@ -22,7 +22,7 @@ fn machine(rom_override: Option<&str>) -> ClockedVm {
         "execute-load",
         "execute-logic",
         "execute-alu",
-        "multiply",
+        "multiply-wide",
         "subword-memory",
         "execute-subword",
         "firmware-dispatch",
@@ -160,7 +160,7 @@ fn runs_the_rust_elf_to_its_halt_loop() {
 
 #[test]
 fn partial_stores_and_extended_alu_retire_through_the_cpu() {
-    let instructions: [u32; 16] = [
+    let instructions: [u32; 18] = [
         0x0001_10b7, // lui x1,0x11
         0x0001_0137, // lui x2,0x10
         0x0601_3183, // ld x3,0x60(x2)
@@ -176,6 +176,8 @@ fn partial_stores_and_extended_alu_retire_through_the_cpu() {
         0x0053_8433, // add x8,x7,x5
         0xfff2_c493, // xori x9,x5,-1
         0x0080_b423, // sd x8,8(x1)
+        0xfff0_0493, // addi x9,x0,-1
+        0x0294_b533, // mulhu x10,x9,x9
         0x0040_90a3, // sh x4,1(x1)
     ];
     let mut words = [0; 32];
@@ -188,7 +190,7 @@ fn partial_stores_and_extended_alu_retire_through_the_cpu() {
     let input = bits(0x11000);
     let mut committed = Vec::new();
     let mut stopped = false;
-    for _ in 0..17_000 {
+    for _ in 0..54_000 {
         let output = vm.step(&input).unwrap();
         let pc = word(&output[..64]);
         if output[258] {
@@ -208,11 +210,15 @@ fn partial_stores_and_extended_alu_retire_through_the_cpu() {
                     assert!(output[257]);
                     assert_eq!(word(&output[128..192]), 0x11008);
                 }
+                0x40 => {
+                    assert!(output[256]);
+                    assert_eq!(word(&output[192..256]), u64::MAX - 1);
+                }
                 _ => {}
             }
         }
         if output[259] {
-            assert_eq!(pc, 0x3c);
+            assert_eq!(pc, 0x44);
             stopped = true;
         }
         if stopped {
@@ -220,7 +226,7 @@ fn partial_stores_and_extended_alu_retire_through_the_cpu() {
         }
     }
     assert!(stopped);
-    assert_eq!(committed, (0..0x3c).step_by(4).collect::<Vec<_>>());
+    assert_eq!(committed, (0..0x44).step_by(4).collect::<Vec<_>>());
     assert_eq!(
         word(&vm.step(&input).unwrap()[64..128]),
         0x0000_0083_ff83_8318

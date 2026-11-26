@@ -118,11 +118,13 @@
     (def raw-issue (execute-or seed restart))
     (def issue (phase-bit raw-issue started))
 
-    (def capture-first (delay-64 issue))
+    ;; セルフホスト用の長いフェッチにも、添字選択とレジスタの応答までの猶予を取る。
+    (def fetch-window (delay-64 issue))
+    (def capture-first (delay-32 fetch-window))
     (def select-second (delay-16 capture-first))
     (def capture-second (delay-32 select-second))
     (def select-write (delay-16 capture-second))
-    ;; 最後のオペランドは issue の113 tick 後に確定する。
+    ;; 最後のオペランドは issue の145 tick 後に確定する。
     ;; PC 相対命令の NOR は最大493段。メモリや結果選択の遅延も含め1024 tick まで待つ。
     (def ready (delay-1024 issue))
     (def second-mode (phase-mode select-second issue))

@@ -47,7 +47,9 @@
 (define-fun sw () Bool (and (= op #b0100011) (= funct3 #b010)))
 (define-fun op-xor () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b100)))
 (define-fun sltu () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b011)))
-(define-fun mul () Bool (and (= op #b0110011) (= funct7 #b0000001) (= funct3 #b000)))
+(define-fun mulhu () Bool (and (= op #b0110011) (= funct7 #b0000001) (= funct3 #b011)))
+(define-fun mul () Bool
+  (and (= op #b0110011) (= funct7 #b0000001) (or (= funct3 #b000) (= funct3 #b011))))
 (define-fun add () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b000)))
 (define-fun sub () Bool (and (= op #b0110011) (= funct7 #b0100000) (= funct3 #b000)))
 (define-fun and-register () Bool (and (= op #b0110011) (= funct7 #b0000000) (= funct3 #b111)))
@@ -126,6 +128,7 @@
 ; 書き込み要求は全入力で比較し、レジスタ値は要求が立つ場合に比較する。
 (assert (or (distinct valid valid-expected)
             (distinct multiply mul)
+            (distinct high-product mulhu)
             (distinct next-pc next-pc-expected)
             (distinct destination ((_ extract 11 7) instruction))
             (distinct register-write register-write-expected)

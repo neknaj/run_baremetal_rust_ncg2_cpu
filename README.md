@@ -92,6 +92,10 @@ ncg2 check programs/boot.ncg2m
 
 実行用の NCG2 ROM を、この NCG2M データから展開する経路は作業中である。
 
+## Core を組み込んだ ELF
+
+固定版の Core をベアメタル Rust から呼び、RAM に置いた入力を解析・評価する。[ビルドと RAM の入出力](doc/selfhost.md)
+
 ## 起動回路の部品を検証する
 
 検証ツールは Core が展開した NOR ネットリストを読み、参照仕様と出力が異なる入力が存在するかを Z3 に問い合わせる。対象は64ビットの算術・論理・比較、RAM のアドレス変換、[起動用の5種類の命令](doc/boot-execution.md)、[PC 相対の命令と条件分岐](doc/control-execution.md)である。

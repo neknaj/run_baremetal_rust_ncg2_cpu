@@ -13,7 +13,7 @@ sources = [
     "circuit/execute-load.ncg2",
     "circuit/execute-logic.ncg2",
     "circuit/execute-alu.ncg2",
-    "circuit/multiply.ncg2",
+    "circuit/multiply-wide.ncg2",
     "circuit/subword-memory.ncg2",
     "circuit/execute-subword.ncg2",
     "circuit/firmware-dispatch.ncg2",

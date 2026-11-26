@@ -1,10 +1,10 @@
 (namespace rv64
   (export execute-logic)
 
-  ;; XOR と符号なし比較 SLTU の結果を返す。MUL は逐次回路に渡す。
+  ;; XOR と符号なし比較 SLTU の結果を返す。MUL と MULHU は逐次回路に渡す。
   (func execute-logic
     (in (instruction (bits 32)) (left (bits 64)) (right (bits 64)))
-    (out recognized multiply (result (bits 64)))
+    (out recognized multiply (result (bits 64)) high-product)
     (def (opcode rd funct3 rs1 rs2 funct7 imm-i imm-s imm-b imm-u imm-j)
       (decode instruction))
     (def op0 (bit opcode 0))
@@ -39,7 +39,9 @@
     (def is-mul (execute-zero-7 mul-difference))
     (def mul-op (execute-and is-op is-mul))
     (def funct3-zero (execute-zero-3 funct3))
-    (def multiply (execute-and mul-op funct3-zero))
+    (def low-product (execute-and mul-op funct3-zero))
+    (def high-product (execute-and mul-op is-sltu))
+    (def multiply (execute-or low-product high-product))
     (def operation (execute-or is-xor is-sltu))
     (def recognized (execute-and possible operation))
     (def xor-result (::rv64::arithmetic::xor left right))

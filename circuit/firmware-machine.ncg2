@@ -1,10 +1,10 @@
 (namespace rv64
   (export firmware-machine)
 
-  ;; 乗算の初期化を1回行い、実回路の最大457段を越える間隔で更新する。
+  ;; 乗算の初期化を1回行い、実回路の最大460段を越える間隔で更新する。
   ;; done は乗算器に残るため、実行中に立ち上がったときだけ完了として扱う。
   (module firmware-multiply
-    (in start (left (bits 64)) (right (bits 64)))
+    (in start (left (bits 64)) (right (bits 64)) high-half)
     (out (product (bits 64)) finished)
     (def armed (delay-2 1))
     (def initialized (delay-8 start))
@@ -16,7 +16,8 @@
     (def repeat (accept-pulse request not-yet))
     (def either (execute-or start repeat))
     (def capture (phase-bit either armed))
-    (def (product done) (::rv64::arithmetic::mul-low left right initialize capture))
+    (def (low high done) (::rv64::arithmetic::mul-wide left right initialize capture))
+    (def product (::rv64::arithmetic::select high-half low high))
     (def older-done (delay-2 done))
     (def rising (nor no-done older-done))
     (def finished (accept-pulse rising running)))
@@ -34,7 +35,7 @@
       (instruction-window commit instruction rd register-data register-enable))
 
     (def (valid multiply next-offset rd register-data write-register memory-address
-          store-data write-memory)
+          store-data write-memory high-product)
       (firmware-dispatch instruction pc-offset first-value second-value
                          probe-data product fetch-valid probe-address))
     (def (probe-data readable writable)
@@ -45,7 +46,7 @@
     (def stopped (phase-bit 1 failure))
     (def mul-request (execute-and valid multiply))
     (def mul-start (accept-pulse ready mul-request))
-    (def (product mul-finished) (firmware-multiply mul-start first-value second-value))
+    (def (product mul-finished) (firmware-multiply mul-start first-value second-value high-product))
     (def not-multiply (nor multiply multiply))
     (def simple (accept-pulse ready not-multiply))
     (def raw-retire (execute-or simple mul-finished))

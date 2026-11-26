@@ -1,0 +1,2 @@
+[build]
+target = "riscv64im-unknown-none-elf"

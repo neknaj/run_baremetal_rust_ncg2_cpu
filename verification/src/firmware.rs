@@ -24,6 +24,7 @@ pub(super) fn emit_dispatch(outputs: &[Wire]) {
         ("multiply", 1),
         ("register-write", 135),
         ("memory-write", 264),
+        ("high-product", 265),
     ] {
         println!("(define-fun {port} () Bool {})", name(outputs[bit]));
     }

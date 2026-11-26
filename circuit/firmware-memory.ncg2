@@ -1,5 +1,5 @@
 (namespace rv64
-  (export firmware-fetch firmware-data-map firmware-data-memory)
+  (export firmware-fetch firmware-data-map firmware-data-memory firmware-data-access)
 
   (memory firmware-bss (address 9) (data (bits 64)))
   (memory firmware-stack (address 11) (data (bits 64)))
@@ -91,6 +91,12 @@
     (def rom-word (slice address 3 5))
     (def bss-word (slice address 3 9))
     (def stack-word (slice address 3 11)))
+
+  ;; 命令側は読み書きの可否だけを使い、物理バンク内の添字はメモリ側で扱う。
+  (func firmware-data-access (in (address (bits 64))) (out readable writable)
+    (def (rom bss stack rom-word bss-word stack-word) (firmware-data-map address))
+    (def writable (execute-or bss stack))
+    (def readable (execute-or rom writable)))
 
   ;; tick t のフレームで書き込みを指定すると、t + 15 の RAM 更新に反映する。
   ;; アドレス・データ・許可をフレームごとにそろえ、ROM と未配置のアドレスには書き込まない。
