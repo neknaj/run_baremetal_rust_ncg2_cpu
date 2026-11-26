@@ -606,6 +606,7 @@ mod tests {
             let mut ready = false;
             let mut input = [false; 66];
             let mut appeared = Vec::new();
+            let mut finished = false;
             for tick in 1..700 {
                 if next < words.len() && tick == present {
                     ready = true;
@@ -635,6 +636,7 @@ mod tests {
                 } else {
                     assert!(!output[131]);
                     if output[130] {
+                        finished = true;
                         assert_eq!(writes.iter().map(|(_, address, data)| (*address, *data)).collect::<Vec<_>>(),
                                    [(0x10000, words[1]), (0x10008, words[2])]);
                         assert!(appeared[2] < writes[0].0 && writes[0].0 < acknowledgements[2]);
@@ -644,6 +646,7 @@ mod tests {
             }
             assert_eq!(acknowledgements.len(), if corrupted { 2 } else { 3 });
             assert_eq!(writes.len(), if corrupted { 0 } else { 2 });
+            assert_eq!(finished, !corrupted);
         }
     }
 
