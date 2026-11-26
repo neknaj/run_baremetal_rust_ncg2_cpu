@@ -74,6 +74,22 @@ pub fn continuous_machines(
     Ok((handoff, receiver))
 }
 
+/// 受信から CPU への引き渡しまでを一つの回路として展開する。
+///
+/// # Errors
+///
+/// 読み込み、展開または公開ポートの照合に失敗した場合に返す。
+#[allow(dead_code)]
+pub fn circuit_loader_machine(path: &Path) -> Result<ClockedVm, Box<dyn Error>> {
+    let entry = "uart-circuit-loader-system";
+    lower_project(
+        path, entry, entry,
+        &[("rx", 1), ("probe-address", 64)],
+        &[("pc", 64), ("bus-address", 64), ("read-data", 64), ("owner", 1),
+          ("issue", 1), ("commit", 1), ("stopped", 1), ("bus-write", 1), ("uart-error", 1)],
+    )
+}
+
 fn lower_project(
     path: &Path,
     entry: &str,
