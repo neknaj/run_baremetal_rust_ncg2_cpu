@@ -3,6 +3,7 @@
 #![no_std]
 extern crate alloc;
 
+pub mod delay;
 pub mod fanout;
 pub mod nor_inputs;
 
