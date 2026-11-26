@@ -44,6 +44,102 @@ pub proof fn shared_completion_timing(
     };
 }
 
+/// 除算の完了を待つ命令枠では、通常の完了から次の命令が早期に発行されることはない。
+///
+/// 除算器の完了予定時刻と、先行命令の通知が残っていないことを前提とする。
+pub proof fn divide_window_rejects_early_issue(
+    simple: spec_fn(int) -> bool,
+    multiply_finished: spec_fn(int) -> bool,
+    divide_finished: spec_fn(int) -> bool,
+    valid: spec_fn(int) -> bool,
+    seed: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+    start: int,
+    until: int,
+)
+    requires
+        4 <= start <= until < start + 35222,
+        !simple(start + 1027),
+        forall|t: int| start - 1035 <= t < start ==> !(#[trigger] issue(t)),
+        forall|t: int| start < t < 11 ==> !(#[trigger] issue(t)),
+        forall|t: int| #[trigger] simple(t) ==> issue(t - 1027),
+        forall|t: int| start - 10 <= t < start + 35211 ==> !(#[trigger] multiply_finished(t)),
+        forall|t: int| start - 10 <= t < start + 35211 ==> !(#[trigger] divide_finished(t)),
+        forall|t: int| start - 2 <= t < start + 35219 ==> !(#[trigger] seed(t)),
+        forall|t: int| t >= 11 ==> #[trigger] issue(t)
+            == (seed(t - 3) || (simple(t - 9) || multiply_finished(t - 11) || divide_finished(t - 11))
+                && valid(t - 6)),
+    ensures forall|t: int| start < t <= until ==> !(#[trigger] issue(t)),
+    decreases until - start,
+{
+    if start < until {
+        divide_window_rejects_early_issue(
+            simple, multiply_finished, divide_finished, valid, seed, issue, start, until - 1,
+        );
+        if issue(until) {
+            assert(until >= 11);
+            assert(!seed(until - 3));
+            assert(!multiply_finished(until - 11) && !divide_finished(until - 11));
+            assert(simple(until - 9));
+            let prior = until - 1036;
+            assert(issue(prior));
+            if prior < start {
+                assert(!issue(prior));
+            } else if prior == start {
+                assert(!simple(until - 9));
+            } else {
+                assert(!issue(prior));
+            }
+        }
+        assert forall|t: int| start < t <= until implies !(#[trigger] issue(t)) by {
+            if t != until {
+                assert(t <= until - 1);
+            }
+        };
+    }
+}
+
+/// 有効な除算の完了通知から、退役と次の命令発行の時刻を得る。
+pub proof fn divide_window_completion(
+    simple: spec_fn(int) -> bool,
+    multiply_finished: spec_fn(int) -> bool,
+    divide_finished: spec_fn(int) -> bool,
+    long_finished: spec_fn(int) -> bool,
+    valid: spec_fn(int) -> bool,
+    commit: spec_fn(int) -> bool,
+    seed: spec_fn(int) -> bool,
+    issue: spec_fn(int) -> bool,
+    start: int,
+)
+    requires
+        start >= 4,
+        !simple(start + 1027),
+        forall|t: int| start - 1035 <= t < start ==> !(#[trigger] issue(t)),
+        forall|t: int| start < t < 11 ==> !(#[trigger] issue(t)),
+        forall|t: int| #[trigger] simple(t) ==> issue(t - 1027),
+        forall|t: int| start - 10 <= t < start + 35211 ==> !(#[trigger] multiply_finished(t)),
+        forall|t: int| start - 10 <= t < start + 35211 ==> !(#[trigger] divide_finished(t)),
+        forall|t: int| start - 2 <= t < start + 35219 ==> !(#[trigger] seed(t)),
+        divide_finished(start + 35211),
+        valid(start + 35216),
+        forall|t: int| t >= 2 ==> #[trigger] long_finished(t)
+            == (multiply_finished(t - 2) || divide_finished(t - 2)),
+        forall|t: int| t >= 6 ==> #[trigger] commit(t)
+            == ((simple(t - 6) || long_finished(t - 6)) && valid(t - 3)),
+        forall|t: int| t >= 4 ==> #[trigger] issue(t) == (seed(t - 3) || commit(t - 3)),
+    ensures
+        forall|t: int| start < t < start + 35222 ==> !(#[trigger] issue(t)),
+        commit(start + 35219),
+        issue(start + 35222),
+{
+    shared_completion_timing(simple, multiply_finished, divide_finished, long_finished, valid, commit, seed, issue);
+    divide_window_rejects_early_issue(
+        simple, multiply_finished, divide_finished, valid, seed, issue, start, start + 35221,
+    );
+    assert(long_finished(start + 35213));
+    assert(commit(start + 35219));
+}
+
 /// 立ち上がり通知までの遅延、取り込みがないときの保持、反復開始に必要な条件。
 /// 反復には running も必要だが、ここではその値を任意にして証明する。
 pub open spec fn multiply_control(

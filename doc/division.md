@@ -130,4 +130,4 @@ cargo +1.99.1 run --release --locked --manifest-path verification/Cargo.toml \
   --result-file "$work/result.bin" 3000000
 ```
 
-Windows の release ビルドでは、UART で送った78語が転送後の RAM と一致した。CPU へ引き渡してから954,177 tick でプログラムが停止し、退役 PC 230件と終了時の状態1・件数22が QEMU と一致した。
+Windows の release ビルドでは、UART で送った78語が転送後の RAM と一致した。CPU へ引き渡してから954,177 tick で終了位置に達し、退役 PC 230件と終了時の状態1・件数22が QEMU と一致した。
