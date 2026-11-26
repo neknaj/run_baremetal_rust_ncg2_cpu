@@ -57,6 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | "execute-logic"
         | "mul-round"
         | "div-round"
+        | "divide-prepare"
+        | "divide-result"
         | "firmware-dispatch"
         | "firmware-dispatch-core"
         | "firmware-dispatch-uart"
@@ -125,6 +127,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
         "mul-round" => &["decode.ncg2", "arithmetic.ncg2", "multiply.ncg2"],
         "div-round" => &["decode.ncg2", "arithmetic.ncg2", "divide.ncg2"],
+        "divide-prepare" | "divide-result" => {
+            &["decode.ncg2", "arithmetic.ncg2", "divide-operands.ncg2"]
+        }
         "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => {
             &dispatch_sources
         }
@@ -225,6 +230,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-logic" => (160, 67),
         "mul-round" => (386, 257),
         "div-round" => (129, 65),
+        "divide-prepare" => (130, 128),
+        "divide-result" => (258, 128),
         "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => (417, 266),
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
@@ -242,6 +249,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-logic" => Some(31),
         "mul-round" => Some(457),
         "div-round" => Some(462),
+        "divide-prepare" => Some(457),
+        "divide-result" => Some(469),
         "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => Some(505),
         "uart-ram-map" => Some(31),
         _ => None,
@@ -294,6 +303,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firmware::emit_selfhost_data_map(outputs);
     } else if selected == "uart-ram-map" {
         firmware::emit_uart_ram_map(outputs);
+    } else if matches!(selected, "divide-prepare" | "divide-result") {
+        let prepare = selected == "divide-prepare";
+        for (port, start) in [("dividend", 0), ("divisor", 64)] {
+            let value = vector((start..start + 64).map(|index| format!("i{index}")));
+            println!("(define-fun {port} () (_ BitVec 64) {value})");
+        }
+        if !prepare {
+            for (port, start) in [("quotient-magnitude", 128), ("remainder-magnitude", 192)] {
+                let value = vector((start..start + 64).map(|index| format!("i{index}")));
+                println!("(define-fun {port} () (_ BitVec 64) {value})");
+            }
+        }
+        println!("(define-fun signed-mode () Bool i{})", input_count - 2);
+        println!("(define-fun word-mode () Bool i{})", input_count - 1);
+        let names = if prepare {
+            ["prepared-dividend", "prepared-divisor"]
+        } else {
+            ["quotient", "remainder"]
+        };
+        for (port, bits) in names.into_iter().zip(outputs.chunks_exact(64)) {
+            let value = vector(bits.iter().copied().map(name));
+            println!("(define-fun {port} () (_ BitVec 64) {value})");
+        }
+        let specification = if prepare {
+            include_str!("divide_prepare.smt2")
+        } else {
+            include_str!("divide_result.smt2")
+        };
+        print!("{specification}");
     } else if selected == "div-round" {
         let remainder = vector((0..64).map(|index| format!("i{index}")));
         let divisor = vector((64..128).map(|index| format!("i{index}")));
