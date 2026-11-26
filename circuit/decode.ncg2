@@ -1,0 +1,45 @@
+(using nor)
+
+(namespace rv64
+  (export decode)
+
+  ;; 即値の並べ替えは RISC-V の Base Instruction Formats に従う。
+  ;; opcode による形式選択は制御回路で行うので、ここでは候補を並列に出す。
+  (func decode
+    (in (instruction (bits 32)))
+    (out
+      (opcode (bits 7)) (rd (bits 5)) (funct3 (bits 3))
+      (rs1 (bits 5)) (rs2 (bits 5)) (funct7 (bits 7))
+      (immediate-i (bits 64)) (immediate-s (bits 64)) (immediate-b (bits 64))
+      (immediate-u (bits 64)) (immediate-j (bits 64)))
+    (def opcode (slice instruction 0 7))
+    (def rd (slice instruction 7 5))
+    (def funct3 (slice instruction 12 3))
+    (def rs1 (slice instruction 15 5))
+    (def rs2 (slice instruction 20 5))
+    (def funct7 (slice instruction 25 7))
+
+    (def sign (bit instruction 31))
+    (def signs-2 (concat sign sign))
+    (def signs-4 (concat signs-2 signs-2))
+    (def signs-8 (concat signs-4 signs-4))
+    (def signs-16 (concat signs-8 signs-8))
+    (def signs-32 (concat signs-16 signs-16))
+    (def low-zero 0)
+    (def lower-zeros #x000)
+    (def i-field (slice instruction 20 12))
+    (def s-low (slice instruction 7 5))
+    (def s-high (slice instruction 25 7))
+    (def b-low (slice instruction 8 4))
+    (def b-high (slice instruction 25 6))
+    (def b-bit11 (bit instruction 7))
+    (def u-field (slice instruction 12 20))
+    (def j-low (slice instruction 21 10))
+    (def j-bit11 (bit instruction 20))
+    (def j-high (slice instruction 12 8))
+
+    (def immediate-i (concat i-field signs-32 signs-16 signs-4))
+    (def immediate-s (concat s-low s-high signs-32 signs-16 signs-4))
+    (def immediate-b (concat low-zero b-low b-high b-bit11 sign signs-32 signs-16 signs-2 sign))
+    (def immediate-u (concat lower-zeros u-field signs-32))
+    (def immediate-j (concat low-zero j-low j-bit11 j-high sign signs-32 signs-8 signs-2 sign))))
