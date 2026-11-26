@@ -4,7 +4,7 @@ use circuitgame2_core::netlist::{ClockedVm, TickInputError, Wire};
 use ncg2_event_queue::{
     EvaluationQueue,
     fanout::{Pin, ReverseDependencies, StoragePins},
-    latch_lanes::{append_shift_changes, changed_lanes, consecutive_tail, shift_latch_word},
+    latch_lanes::{changed_lanes, consecutive_tail, evaluate_shift_latch},
     nor_inputs::PackedNorInputs,
 };
 use std::ops::Range;
@@ -302,11 +302,10 @@ impl EventVm {
             if let Some(word) = &mut device.shift_word {
                 let slots = self.nor.read_only();
                 let head = device.pins.data[0].read(slots);
-                let (next, changes) = shift_latch_word(*word, device.output.len() as u32, head)
-                    .expect("構築時にラッチの幅を検査済み");
                 // 他の素子が読む配線は、すべての評価が終わるまで書き換えない。
-                *word = next;
-                append_shift_changes(&mut self.changes, device.output.start, next, changes);
+                *word = evaluate_shift_latch(
+                    &mut self.changes, device.output.start, *word, device.output.len() as u32, head,
+                ).expect("構築時にラッチの幅を検査済み");
                 return;
             }
             if let Some(base) = device.consecutive_tail {

@@ -268,4 +268,113 @@ pub fn append_shift_changes(out: &mut Vec<(usize, bool)>, base: usize, next: u64
     assert(shift_changes(added, base, next, mask));
 }
 
+
+/// 先頭の採取値と、1つ手前の旧出力から、指定されたラッチの次の値を求める。
+pub open spec fn shift_input_at(old: u64, head: bool, lane: usize) -> bool {
+    if lane == 0 { head } else { lane_set(old, (lane - 1) as usize) }
+}
+
+/// 旧ラッチの各ビットを従来の順序で比較した場合に得る確定候補を表す。
+pub open spec fn shifted_latch_updates(
+    updates: Seq<(usize, bool)>, base: usize, width: u32, old: u64, head: bool,
+) -> bool {
+    &&& forall|i: int| 0 <= i < updates.len() ==> {
+        let (slot, value) = #[trigger] updates[i];
+        let lane = (slot - base) as usize;
+        &&& base <= slot < base + width
+        &&& value == shift_input_at(old, head, lane)
+        &&& value != lane_set(old, lane)
+    }
+    &&& forall|lane: usize| lane < width ==>
+        (shift_input_at(old, head, lane) != lane_set(old, lane))
+        == #[trigger] updates.contains(((base + lane) as usize, shift_input_at(old, head, lane)))
+    &&& forall|i: int, j: int| #![trigger updates[i], updates[j]]
+        0 <= i < j < updates.len() ==> updates[i].0 < updates[j].0
+}
+
+/// 次のラッチ状態を返し、旧出力との比較で変わる配線を確定候補へ追加する。
+///
+/// 幅を表せない場合は None を返し、候補の列を保つ。
+///
+/// # Panics
+///
+/// 配線の先頭から63を加算でき、候補の列に最大64件を追加できる範囲を渡す。
+#[inline]
+pub fn evaluate_shift_latch(
+    out: &mut Vec<(usize, bool)>, base: usize, old_word: u64, width: u32, head: bool,
+) -> (result: Option<u64>)
+    requires
+        base as int + 63 <= usize::MAX,
+        old(out)@.len() + 64 <= usize::MAX,
+    ensures
+        result.is_some() <==> 1 <= width <= 64,
+        result.is_none() ==> final(out)@ == old(out)@,
+        result matches Some(next) ==> {
+            &&& forall|lane: usize| lane < 64 ==> #[trigger] lane_set(next, lane)
+                == (lane < width && shift_input_at(old_word, head, lane))
+            &&& exists|suffix: Seq<(usize, bool)>|
+                final(out)@ == old(out)@ + suffix
+                    && #[trigger] shifted_latch_updates(suffix, base, width, old_word, head)
+        },
+{
+    let Some((next, mask)) = shift_latch_word(old_word, width, head) else {
+        return None;
+    };
+    assert forall|lane: usize| lane < 64 implies #[trigger] lane_set(next, lane)
+        == (lane < width && shift_input_at(old_word, head, lane))
+    by {
+        let i = lane as u32;
+        if lane < width {
+            assert(((next >> i) & 1 != 0) ==
+                if i == 0 { head } else { ((old_word >> ((i - 1) as u32)) & 1 != 0) });
+            assert((next >> i) == (next >> lane)) by(bit_vector) requires i == lane as u32, lane < 64;
+            if lane != 0 {
+                assert((old_word >> ((i - 1) as u32)) == (old_word >> ((lane - 1) as usize)))
+                    by(bit_vector) requires i == lane as u32, 0 < lane < 64;
+            }
+        } else {
+            assert((next >> i) & 1 == 0);
+            assert((next >> i) == (next >> lane)) by(bit_vector) requires i == lane as u32, lane < 64;
+        }
+    };
+    assert forall|lane: usize| lane < 64 implies #[trigger] lane_set(mask, lane)
+        == (lane < width && lane_set(old_word, lane) != lane_set(next, lane))
+    by {
+        let i = lane as u32;
+        assert((mask >> i) & 1 != 0
+            == (i < width && ((old_word >> i) & 1) != ((next >> i) & 1)));
+        assert((mask >> i) == (mask >> lane) && (old_word >> i) == (old_word >> lane)
+            && (next >> i) == (next >> lane))
+            by(bit_vector) requires i == lane as u32, lane < 64;
+        assert(((old_word >> lane) & 1 != 0) != ((next >> lane) & 1 != 0)
+            == (((old_word >> lane) & 1) != ((next >> lane) & 1))) by(bit_vector);
+    };
+    append_shift_changes(out, base, next, mask);
+    proof {
+        let suffix = choose|suffix: Seq<(usize, bool)>|
+            out@ == old(out)@ + suffix && shift_changes(suffix, base, next, mask);
+        assert forall|i: int| 0 <= i < suffix.len() implies {
+            let (slot, value) = #[trigger] suffix[i];
+            let lane = (slot - base) as usize;
+            &&& base <= slot < base + width
+            &&& value == shift_input_at(old_word, head, lane)
+            &&& value != lane_set(old_word, lane)
+        } by {
+            let (slot, value) = suffix[i];
+            let lane = (slot - base) as usize;
+            assert(lane_set(mask, lane));
+            assert(lane_set(next, lane) == (lane < width && shift_input_at(old_word, head, lane)));
+        };
+        assert forall|lane: usize| lane < width implies
+            (shift_input_at(old_word, head, lane) != lane_set(old_word, lane))
+            == #[trigger] suffix.contains(((base + lane) as usize, shift_input_at(old_word, head, lane)))
+        by {
+            assert(lane_set(mask, lane)
+                == suffix.contains(((base + lane) as usize, lane_set(next, lane))));
+        };
+        assert(shifted_latch_updates(suffix, base, width, old_word, head));
+    }
+    Some(next)
+}
+
 } // verus!
