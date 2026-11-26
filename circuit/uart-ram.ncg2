@@ -1,0 +1,47 @@
+(namespace rv64
+  (export uart-ram)
+
+  (latch uart-ram-request (width 128))
+  (memory uart-program-ram (address 15) (data (bits 64)))
+  (memory uart-tail-ram (address 10) (data (bits 64)))
+  (memory uart-mailbox-ram (address 5) (data (bits 64)))
+  (memory uart-stack-ram (address 11) (data (bits 64)))
+
+  ;; 書き込みを指定する tick までにアドレスを31段の判定回路へ通す。
+  ;; 許可と同じフレームのアドレス・データを、許可の2段に合わせてラッチする。
+  (module uart-ram-route
+    (in (address (bits 64)) (write-data (bits 64)) write)
+    (out (routed-address (bits 64)) (routed-data (bits 64))
+         write-program write-tail write-mailbox write-stack
+         program tail mailbox stack)
+    (def (program tail mailbox stack program-word tail-word mailbox-word stack-word)
+      (uart-ram-map address))
+    (def request (concat address write-data))
+    (def staged (uart-ram-request request 1))
+    (def routed (uart-ram-request staged 1))
+    (def routed-address (slice routed 0 64))
+    (def routed-data (slice routed 64 64))
+    (def write-program (execute-and write program))
+    (def write-tail (execute-and write tail))
+    (def write-mailbox (execute-and write mailbox))
+    (def write-stack (execute-and write stack)))
+
+  ;; フェッチとデータは同じ記憶内容を参照する。書き込み時も RAM は以前の語を読む。
+  (module uart-ram
+    (in (address (bits 64)) (write-data (bits 64)) write)
+    (out (read-data (bits 64)))
+    (def (routed-address routed-data write-program write-tail write-mailbox write-stack
+          program tail mailbox stack)
+      (uart-ram-route address write-data write))
+    (def program-word (slice routed-address 3 15))
+    (def tail-word (slice routed-address 3 10))
+    (def mailbox-word (slice routed-address 3 5))
+    (def stack-word (slice routed-address 3 11))
+    (def program-data (uart-program-ram program-word routed-data write-program))
+    (def tail-data (uart-tail-ram tail-word routed-data write-tail))
+    (def mailbox-data (uart-mailbox-ram mailbox-word routed-data write-mailbox))
+    (def stack-data (uart-stack-ram stack-word routed-data write-stack))
+    (def from-program (::rv64::arithmetic::select program #x0000000000000000 program-data))
+    (def from-tail (::rv64::arithmetic::select tail from-program tail-data))
+    (def from-mailbox (::rv64::arithmetic::select mailbox from-tail mailbox-data))
+    (def read-data (::rv64::arithmetic::select stack from-mailbox stack-data))))

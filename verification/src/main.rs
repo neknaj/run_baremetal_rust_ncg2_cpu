@@ -225,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-logic" => Some(31),
         "mul-round" => Some(457),
         "firmware-dispatch" | "firmware-dispatch-core" => Some(505),
-        "uart-ram-map" => Some(48),
+        "uart-ram-map" => Some(31),
         _ => None,
     };
     if let Some(limit) = depth_limit {
