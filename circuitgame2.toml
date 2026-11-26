@@ -1,0 +1,15 @@
+sources = [
+    "circuit/decode.ncg2",
+    "circuit/boot-rom.ncg2",
+    "circuit/fetch-boot.ncg2",
+    "circuit/arithmetic.ncg2",
+    "circuit/program-counter.ncg2",
+    "circuit/register-file.ncg2",
+    "circuit/execute-boot.ncg2",
+    "circuit/boot-machine.ncg2",
+]
+entry = "::rv64::boot-machine"
+
+[[vram]]
+name = "boot-ram"
+read-output = "probe-data"

@@ -1,0 +1,178 @@
+(namespace rv64
+  (export boot-machine)
+
+  (latch phase-bit (width 1))
+  (latch operand (width 64))
+  (latch response-address (width 11))
+  (memory boot-ram (address 11) (data (bits 64)))
+
+  (module delay-1 (in value) (out delayed)
+    (def delayed (phase-bit value 1)))
+
+  (module delay-2 (in value) (out delayed)
+    (def half (delay-1 value))
+    (def delayed (delay-1 half)))
+
+  (module delay-4 (in value) (out delayed)
+    (def half (delay-2 value))
+    (def delayed (delay-2 half)))
+
+  (module delay-8 (in value) (out delayed)
+    (def half (delay-4 value))
+    (def delayed (delay-4 half)))
+
+  (module delay-16 (in value) (out delayed)
+    (def half (delay-8 value))
+    (def delayed (delay-8 half)))
+
+  (module delay-32 (in value) (out delayed)
+    (def half (delay-16 value))
+    (def delayed (delay-16 half)))
+
+  (module delay-64 (in value) (out delayed)
+    (def half (delay-32 value))
+    (def delayed (delay-32 half)))
+
+  (module delay-128 (in value) (out delayed)
+    (def half (delay-64 value))
+    (def delayed (delay-64 half)))
+
+  (module delay-256 (in value) (out delayed)
+    (def half (delay-128 value))
+    (def delayed (delay-128 half)))
+
+  (module delay-512 (in value) (out delayed)
+    (def half (delay-256 value))
+    (def delayed (delay-256 half)))
+
+  (module delay-1024 (in value) (out delayed)
+    (def half (delay-512 value))
+    (def delayed (delay-512 half)))
+
+  ;; 許可と取り込む値を同じ tick にそろえ、選択を次の解除まで保持する。
+  (module phase-mode (in set clear) (out enabled)
+    (def update (execute-or set clear))
+    (def setting (delay-2 set))
+    (def enabled (phase-bit setting update)))
+
+  ;; NOR の初期出力がすべて0なので、最初の過渡値が消えてからパルスを通す。
+  (module accept-pulse (in request condition) (out accepted)
+    (def ready (delay-4 1))
+    (def both (execute-and request condition))
+    (def accepted (phase-bit both ready)))
+
+  (func index-bit (in choose-first first second) (out result)
+    (def choose-second (nor choose-first choose-first))
+    (def a (execute-and choose-first first))
+    (def b (execute-and choose-second second))
+    (def result (execute-or a b)))
+
+  (func select-index
+    (in choose-first (first (bits 5)) (second (bits 5)))
+    (out (result (bits 5)))
+    (def first-0 (bit first 0))
+    (def first-1 (bit first 1))
+    (def first-2 (bit first 2))
+    (def first-3 (bit first 3))
+    (def first-4 (bit first 4))
+    (def second-0 (bit second 0))
+    (def second-1 (bit second 1))
+    (def second-2 (bit second 2))
+    (def second-3 (bit second 3))
+    (def second-4 (bit second 4))
+    (def b0 (index-bit choose-first first-0 second-0))
+    (def b1 (index-bit choose-first first-1 second-1))
+    (def b2 (index-bit choose-first first-2 second-2))
+    (def b3 (index-bit choose-first first-3 second-3))
+    (def b4 (index-bit choose-first first-4 second-4))
+    (def result (concat b0 b1 b2 b3 b4)))
+
+  ;; ワードで整列した 0x2c000～0x2fff8 を RAM の添字に変換する。
+  (func boot-ram-address (in (address (bits 64))) (out mapped (word (bits 11)))
+    (def upper-0 (bit address 14))
+    (def upper-1 (bit address 15))
+    (def upper-2 (bit address 16))
+    (def upper-3 (bit address 17))
+    (def upper-0-mismatch (nor upper-0 upper-0))
+    (def upper-1-mismatch (nor upper-1 upper-1))
+    (def upper-3-mismatch (nor upper-3 upper-3))
+    (def alignment (slice address 0 3))
+    (def high (slice address 18 46))
+    (def padding #b00000000000)
+    (def checked (concat alignment upper-0-mismatch upper-1-mismatch
+                         upper-2 upper-3-mismatch high
+                         padding))
+    (def mismatch (any-bit-64 checked))
+    (def mapped (nor mismatch mismatch))
+    (def word (slice address 3 11)))
+
+  ;; 起動 ROM の命令を順に実行する。commit は1 tick だけ立ち、その次の tick に PC が更新される。
+  ;; 未対応命令や RAM の範囲外への書き込みでは stopped が立ち、次の命令を開始しない。
+  ;; probe-data は同じ出力フレームの probe-response が指す RAM の更新前の値。
+  ;; 外部入力 probe-address の結果は、probe-response がその値と一致したフレームで読む。
+  (module boot-machine
+    (in (probe-address (bits 11)))
+    (out (pc-offset (bits 64)) (probe-data (bits 64))
+         (probe-response (bits 11)) commit stopped)
+    (def initialized (delay-1 1))
+    (def started (delay-2 1))
+    (def seed (nor initialized initialized))
+    (def raw-issue (execute-or seed commit))
+    (def issue (phase-bit raw-issue started))
+
+    (def capture-first (delay-64 issue))
+    (def select-second (delay-16 capture-first))
+    (def capture-second (delay-32 select-second))
+    (def select-write (delay-16 capture-second))
+    ;; Core で展開した実行回路は最大475段。最後のレジスタ読み出しは issue の112 tick 後なので、
+    ;; issue の1024 tick 後まで待ち、ストア先の範囲検査と RAM アドレスの選択も確定させる。
+    (def retire (delay-1024 issue))
+    (def second-mode (phase-mode select-second issue))
+    (def write-mode (phase-mode select-write issue))
+
+    (def pc-offset (program-counter next-offset commit))
+    (def (instruction fetch-valid) (fetch-boot pc-offset))
+    (def (opcode rd funct3 rs1 rs2 funct7 imm-i imm-s imm-b imm-u imm-j)
+      (decode instruction))
+    (def read-index (select-index second-mode rs2 rs1))
+    (def register-index (select-index write-mode destination read-index))
+    (def read-value (register-file register-index write-data register-enable))
+    (def first-value (operand read-value capture-first))
+    (def second-value (operand read-value capture-second))
+
+    (def (execute-valid next-offset destination write-data write-register
+          store-address store-data write-memory)
+      (execute-boot instruction pc-offset first-value second-value))
+    (def (matched store-word) (boot-ram-address store-address))
+    (def no-store (nor write-memory write-memory))
+    (def memory-valid (execute-or no-store matched))
+    (def valid-instruction (execute-and fetch-valid execute-valid))
+    (def valid (execute-and valid-instruction memory-valid))
+    (def invalid (nor valid valid))
+    (def commit (accept-pulse retire valid))
+    (def stop (accept-pulse retire invalid))
+    (def stopped (phase-bit 1 stop))
+    (def register-valid (execute-and valid write-register))
+    (def register-enable (accept-pulse retire register-valid))
+    (def store-valid (execute-and valid write-memory))
+    (def store-enable (accept-pulse retire store-valid))
+
+    ;; ストアのアドレスは retire の後で選ぶとパルスに間に合わない。
+    ;; 実行回路がストアを選んだ時点で接続を切り替え、他の命令では観測先を選ぶ。
+    (def ram-address (select-ram-address store-valid store-word probe-address))
+    (def probe-response (response-address ram-address 1))
+    (def probe-data (boot-ram ram-address store-data store-enable)))
+
+  (func select-ram-address
+    (in choose-store (store-word (bits 11)) (probe-word (bits 11)))
+    (out (address (bits 11)))
+    (def store-low (slice store-word 0 5))
+    (def store-high (slice store-word 5 5))
+    (def store-last (bit store-word 10))
+    (def probe-low (slice probe-word 0 5))
+    (def probe-high (slice probe-word 5 5))
+    (def probe-last (bit probe-word 10))
+    (def low (select-index choose-store store-low probe-low))
+    (def high (select-index choose-store store-high probe-high))
+    (def last (index-bit choose-store store-last probe-last))
+    (def address (concat low high last))))

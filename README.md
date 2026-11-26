@@ -2,6 +2,19 @@
 
 Neknaj Circuit Game 2 で RV64IM の CPU を組み、ベアメタル Rust のプログラムを動かす。最終的には、その CPU 上でも NCG2 Core で回路を評価できるようにする。
 
+## 起動 ROM を実行する
+
+`circuitgame2.toml` のエントリは起動 ROM、レジスタ、実行回路、RAM をつないだ `::rv64::boot-machine` である。リセット後に tick を進めると、ROM の6命令が順に実行される。
+
+```sh
+ncg2 check --project circuitgame2.toml
+ncg2 run --project circuitgame2.toml --input 11111111111
+```
+
+この `run` は1 tick 進める。入力の11ビットは RAM の観測用アドレスで、すべて1にすると末尾の語を指定する。全6命令を実行する結合テストでは、物理アドレス `0x2fff8` に `0x0000000100000003` が書かれ、最後の JAL が同じ PC に戻ることを確認する。実行時の信号と検査手順は[起動回路](doc/boot-execution.md)を参照。
+
+この回路が現在実行するのは、5種類の命令を使う固定 ROM である。コンパイル済み Rust を実行するための命令拡張と NCG2M のイメージの接続は作業中である。
+
 ## 命令デコーダを試す
 
 `circuit/decode.ncg2` は、32ビット命令語から opcode、レジスタ番号、funct3、funct7 と、64ビットに符号拡張した I・S・B・U・J 形式の即値を取り出す。命令形式の選択、レジスタへの書き戻し、メモリアクセスは制御回路で扱う。
@@ -26,7 +39,7 @@ ncg2 run --entry ::rv64::program-counter --input 1000000000000000000000000000000
 
 ## レジスタファイルを試す
 
-`circuit/register-file.ncg2` の `::rv64::register-file` は、5ビットの `index`、64ビットの `write-data`、1ビットの `write-enable` を受け付ける。入力した tick を `t` とすると、`t + 7` の出力 `read-data` はその入力が指定したレジスタの更新前の値である。書き込みを許可した場合は同じ tick に新しい値も確定する。レジスタ `x0` への書き込みは無効であり、読み出しは常に0。tick 0 から7の出力は0であり、最初の要求の結果は tick 8 に現れる。
+`circuit/register-file.ncg2` の `::rv64::register-file` は5ビットの `index`、64ビットの `write-data`、1ビットの `write-enable` を受け付ける。入力した tick を `t` とすると、`t + 7` の出力 `read-data` はその入力が指定したレジスタの更新前の値である。書き込みを許可した場合は同じ tick に新しい値も確定する。レジスタ `x0` への書き込みは無効であり、読み出しは常に0。tick 0 から7の出力は0であり、最初の要求の結果は tick 8 に現れる。
 
 アドレスと書き込み入力は各 tick に1回ずつ与えられる。有効な書き込みの直後に同じレジスタを読むと、直前の書き込みが反映される。例えば tick 1 に `x1` へ42を書き、tick 2 に `x1` を読むと、tick 8 の出力は0、tick 9 の出力は42になる。後段の状態素子が tick 9 の読み出し結果を使うのは tick 10 からである。
 
@@ -35,7 +48,7 @@ ncg2 check circuit/decode.ncg2 circuit/register-file.ncg2
 ncg2 run --entry ::rv64::register-file circuit/decode.ncg2 circuit/register-file.ncg2
 ```
 
-`run` に `--input` を追加すると、1入力につき1 tick 進む。各ポートのビットは最下位から並べ、入力を処理するまで次の入力で進める。更新と観測は [NCG2 の tick と状態素子の仕様](https://neknaj.github.io/circuitgame2/docs/simulation.html#状態素子) に従う。
+`run` に `--input` を追加すると、1入力につき1 tick 進む。各ポートのビットは最下位から並べる。更新と観測は [NCG2 の tick と状態素子の仕様](https://neknaj.github.io/circuitgame2/docs/simulation.html#状態素子) に従う。
 
 ## 起動 ELF を作る
 
@@ -55,17 +68,17 @@ python tools/elf_image.py target/riscv64im-unknown-none-elf/release/ncg2-rv64-bo
 ncg2 check programs/boot.ncg2m
 ```
 
-次は、命令デコーダをレジスタ・ALU・PC に接続する。プログラムはプロジェクトに置いた命令イメージから NCG2M で ROM を生成し、通常のシミュレーションで読み出せるようにする。
+固定 ROM から、プロジェクト内の命令イメージを NCG2M で展開した ROM に移行する。
 
-## 算術回路を検証する
+## 算術回路と RAM のアドレス変換を検証する
 
-`::rv64::arithmetic::add` は64ビットの折り返し加算、`::rv64::arithmetic::shift-left` は0から63ビットの論理左シフトを行う。検証ツールは Core が展開した NOR ネットリストを読み、参照演算と出力が異なる入力が存在するかを Z3 に問い合わせる。
+`::rv64::arithmetic::add` は64ビットの折り返し加算、`::rv64::arithmetic::shift-left` は0から63ビットの論理左シフトを行う。検証ツールは Core が展開した NOR ネットリストを読み、参照仕様と出力が異なる入力が存在するかを Z3 に問い合わせる。RAM のアドレス変換では受理するアドレスの範囲と8バイト整列、および有効アドレスに対応する語の添字を検証する。
 
 ```sh
 set -e
 host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
 mkdir -p target/verification
-for circuit in add shift-left; do
+for circuit in add shift-left boot-ram-address; do
   model="target/verification/$circuit.smt2"
   cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
     --target "$host" --target-dir target/verification -- "$circuit" > "$model"
@@ -75,4 +88,4 @@ for circuit in add shift-left; do
 done
 ```
 
-両方の結果が `unsat` なら、その回路の出力は全入力で参照演算と一致する。
+各結果が `unsat` なら、その回路の出力は仕様の対象となる全入力で参照仕様と一致する。
