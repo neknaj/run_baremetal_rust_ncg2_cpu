@@ -13,6 +13,7 @@ resolver = "3"
 ncg2-event-queue = { path = "event-queue" }
 circuitgame2-core = { git = "https://github.com/neknaj/circuitgame2-core.git", rev = "7ce39f6465390e64c023a63f1f89b9d0fba0c426" }
 
+circuitgame2-project-config = { git = "https://github.com/neknaj/circuitgame2-core.git", rev = "7ce39f6465390e64c023a63f1f89b9d0fba0c426" }
+
 [dev-dependencies]
 ncg2-uart-loader = { path = "uart-loader" }
-circuitgame2-project-config = { git = "https://github.com/neknaj/circuitgame2-core.git", rev = "7ce39f6465390e64c023a63f1f89b9d0fba0c426" }
