@@ -292,13 +292,13 @@ mod tests {
         panic!("全語を確定して RAM を CPU へ渡すまでの上限を超えた");
     }
 
-    fn continuous_wire(words: &[u64]) -> impl Iterator<Item = bool> + '_ {
+    fn continuous_wire(words: &[u64], bit_ticks: usize) -> impl Iterator<Item = bool> + '_ {
         let wire = [words.len() as u64].into_iter().chain(words.iter().copied())
-            .flat_map(u64::to_le_bytes).flat_map(|byte| {
+            .flat_map(u64::to_le_bytes).flat_map(move |byte| {
                 std::iter::once(false)
                     .chain((0..8).map(move |bit| (byte >> bit) & 1 != 0))
                     .chain(std::iter::once(true))
-                    .flat_map(|level| std::iter::repeat_n(level, 16))
+                    .flat_map(move |level| std::iter::repeat_n(level, bit_ticks))
             });
         std::iter::repeat_n(true, 16).chain(wire).chain(std::iter::repeat(true))
     }
@@ -307,6 +307,39 @@ mod tests {
         bits.iter().enumerate().fold(0, |word, (bit, &value)| {
             word | (u64::from(value) << bit)
         })
+    }
+
+    #[test]
+    fn both_uart_rates_hold_each_word_until_its_acknowledgement() {
+        let words = [0x7168_c033_14c4_f37a, 0xf0ff_0133_6789_9421, 0x0000_006f_0262_b023];
+        for (name, bit_ticks, report_offset) in [
+            ("uart-loader-receive", 16, 159),
+            ("uart-loader-receive-8", 8, 87),
+        ] {
+            let mut receiver = lower_handoff(name).unwrap();
+            assert_eq!(receiver.reset(), vec![false; 66]);
+            let expected: Vec<_> = [words.len() as u64].into_iter().chain(words).collect();
+            let ready_ticks: Vec<_> = (0..expected.len())
+                .map(|word| 17 + (8 * word + 7) * 10 * bit_ticks + report_offset + 13)
+                .collect();
+            let last_tick = ready_ticks[expected.len() - 1] + 32;
+            let mut received = 0;
+            for (index, rx) in continuous_wire(&words, bit_ticks).take(last_tick).enumerate() {
+                let tick = index + 1;
+                // ACK は ready が公開されてから4 tick 後に1回だけ与える。
+                let ack = ready_ticks.iter().any(|&ready| tick == ready + 4);
+                let output = receiver.step(&[rx, ack]).unwrap();
+                if ready_ticks.contains(&tick) {
+                    received += 1;
+                }
+                let ready = ready_ticks.iter().any(|&at| at <= tick && tick < at + 16);
+                let word = if received == 0 { 0 } else { expected[received - 1] };
+                assert_eq!(read_word(&output[..64]), word, "{name}, tick {tick}");
+                assert_eq!(output[64], ready, "{name}, tick {tick}");
+                assert!(!output[65], "{name}, tick {tick}: 有効な波形で異常を報告した");
+            }
+            assert_eq!(received, expected.len());
+        }
     }
 
     #[test]
@@ -328,7 +361,7 @@ mod tests {
         let mut first_issue = None;
         let mut retirements = Vec::new();
 
-        for (index, rx) in continuous_wire(&words).take(12_000).enumerate() {
+        for (index, rx) in continuous_wire(&words, 16).take(12_000).enumerate() {
             let cycle = index + 1;
             assert!(!receiver_output[65], "tick {cycle}: 受信器がエラーを返した");
             let input = if receiver_output[64] && !delivered {
