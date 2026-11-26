@@ -23,6 +23,39 @@ pub open spec fn round_at(first: int, tick: int, round: int) -> bool {
     round >= 0 && tick == first + 518 * round
 }
 
+/// リセットから初回の開始要求が効く直前まで、取り込みがなく完了フラグは0のままになる。
+pub proof fn reset_multiply_has_no_pending_captures(
+    start: spec_fn(int) -> bool,
+    capture: spec_fn(int) -> bool,
+    done: spec_fn(int) -> bool,
+    finished: spec_fn(int) -> bool,
+    until: int,
+)
+    requires
+        multiply_control(start, capture, done, finished),
+        0 <= until,
+        forall|t: int| t <= 0 ==> !(#[trigger] capture(t)),
+        forall|t: int| t <= 0 ==> !(#[trigger] done(t)),
+        forall|t: int| 0 < t <= until ==> !(#[trigger] start(t - 3)),
+    ensures
+        forall|t: int| t <= until ==> !(#[trigger] capture(t)),
+        forall|t: int| t <= until + 1 ==> !(#[trigger] done(t)),
+        forall|t: int| t <= until + 6 ==> !(#[trigger] finished(t)),
+    decreases until,
+{
+    if until > 0 {
+        reset_multiply_has_no_pending_captures(start, capture, done, finished, until - 1);
+        assert(!start(until - 3));
+        assert(!capture(until - 518));
+    }
+    assert(!capture(until));
+    assert(!done(until));
+    assert(!done(until + 1));
+    assert forall|t: int| t <= until + 6 implies !(#[trigger] finished(t)) by {
+        assert(!done(t - 5));
+    }
+}
+
 /// 開始前に反復の遅延列が空なら、同じ開始要求に由来する取り込みは518 tick 間隔に並ぶ。
 pub proof fn capture_follows_single_start(
     start: spec_fn(int) -> bool,
