@@ -29,6 +29,8 @@
   ;; word、ready、receiver-error は UART の受信語バッファから受け取る。
   ;; 受信器の待機語と、ここで保持する実行中の語で最大2語を扱う。
   ;; 書き込み先を安定させてから許可を出し、要求が RAM へ届くまで次の添字に進めない。
+  ;; 受信エラーは以後の要求を止める。RAM が既に受け取った許可による変更は確定する。
+  ;; 必要な語が届かなければ待ち続け、シミュレーションの tick 上限で呼び出し側が中断する。
   (module uart-circuit-loader
     (in (word (bits 64)) ready receiver-error)
     (out ack (address (bits 64)) (data (bits 64)) write finished error)
