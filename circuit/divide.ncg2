@@ -1,0 +1,16 @@
+(namespace rv64::arithmetic
+  (export div-round)
+
+  ;; 被除数の次のビットを上位桁から順に受け取り、余りと商の1ビットを求める。
+  ;; 試行値は65ビット。下位64ビットの減算で借りが出ても、上位桁が1なら減算を採用する。
+  (func div-round
+    (in (remainder (bits 64)) (divisor (bits 64)) next-bit)
+    (out (next-remainder (bits 64)) quotient-bit)
+    (def remainder-low (slice remainder 0 63))
+    (def trial-low (concat next-bit remainder-low))
+    (def trial-high (bit remainder 63))
+    (def inverted-divisor (xor divisor #xffffffffffffffff))
+    (def (no-borrow difference) (add-64 trial-low inverted-divisor 1))
+    (def has-borrow (nor trial-high no-borrow))
+    (def quotient-bit (nor has-borrow has-borrow))
+    (def next-remainder (select quotient-bit trial-low difference))))

@@ -56,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | "execute-load"
         | "execute-logic"
         | "mul-round"
+        | "div-round"
         | "firmware-dispatch"
         | "firmware-dispatch-core"
         | "firmware-dispatch-uart"
@@ -123,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "execute-logic.ncg2",
         ],
         "mul-round" => &["decode.ncg2", "arithmetic.ncg2", "multiply.ncg2"],
+        "div-round" => &["decode.ncg2", "arithmetic.ncg2", "divide.ncg2"],
         "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => {
             &dispatch_sources
         }
@@ -222,6 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-load" => (96, 71),
         "execute-logic" => (160, 67),
         "mul-round" => (386, 257),
+        "div-round" => (129, 65),
         "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => (417, 266),
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
@@ -238,6 +241,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-load" => Some(468),
         "execute-logic" => Some(31),
         "mul-round" => Some(457),
+        "div-round" => Some(462),
         "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => Some(505),
         "uart-ram-map" => Some(31),
         _ => None,
@@ -290,6 +294,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firmware::emit_selfhost_data_map(outputs);
     } else if selected == "uart-ram-map" {
         firmware::emit_uart_ram_map(outputs);
+    } else if selected == "div-round" {
+        let remainder = vector((0..64).map(|index| format!("i{index}")));
+        let divisor = vector((64..128).map(|index| format!("i{index}")));
+        let next_remainder = vector(outputs[..64].iter().copied().map(name));
+        println!("(define-fun remainder () (_ BitVec 64) {remainder})");
+        println!("(define-fun divisor () (_ BitVec 64) {divisor})");
+        println!("(define-fun next-bit () (_ BitVec 1) (ite i128 #b1 #b0))");
+        println!("(define-fun next-remainder () (_ BitVec 64) {next_remainder})");
+        println!("(define-fun quotient-bit () Bool {})", name(outputs[64]));
+        print!("{}", include_str!("div_round.smt2"));
     } else if selected == "mul-round" {
         multiply::emit(outputs);
     } else if matches!(
