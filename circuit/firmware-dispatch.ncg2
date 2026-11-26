@@ -1,16 +1,16 @@
 (namespace rv64
   (export firmware-dispatch)
 
-  ;; 命令の結果と更新要求を一組にする。RAM から得た値と完了済みの積を受け取る。
+  ;; 命令の結果と更新要求を一組にする。RAM の値と、乗算器または除算器の結果を受け取る。
   ;; 無効なフェッチ、未対応命令、禁止されたアクセスでは更新要求をすべて0にする。
   ;; memory-address はメモリ命令がデータポートを使わない場合に probe-address を返す。
   (func firmware-dispatch
     (in (instruction (bits 32)) (pc-offset (bits 64)) (first-value (bits 64))
-        (second-value (bits 64)) (loaded-data (bits 64)) (product (bits 64))
+        (second-value (bits 64)) (loaded-data (bits 64)) (long-result (bits 64))
         fetch-valid (probe-address (bits 64)))
     (out valid multiply (next-offset (bits 64)) (destination (bits 5))
          (register-data (bits 64)) write-register (memory-address (bits 64))
-         (store-data (bits 64)) write-memory high-product)
+         (store-data (bits 64)) write-memory high-product divide signed-mode word-mode remainder-mode)
     (def (basic-valid basic-next destination basic-data basic-write store-address full-store-data store)
       (execute-boot instruction pc-offset first-value second-value))
     (def (control control-valid control-next control-rd control-data control-write)
@@ -19,6 +19,7 @@
     (def (byte-load byte-valid partial-store partial-valid word-address byte-data partial-data)
       (execute-subword instruction first-value second-value loaded-data))
     (def (logic multiply logic-data high-product) (execute-logic instruction first-value second-value))
+    (def (divide signed-mode word-mode remainder-mode) (execute-divide instruction))
     (def (alu alu-data) (::rv64::arithmetic::execute-alu instruction first-value second-value))
 
     (def writable (firmware-full-store-access store-address))
@@ -26,9 +27,10 @@
     (def store-valid (execute-or not-store writable))
     (def basic-accepted (execute-and basic-valid store-valid))
     (def logic-or-alu (execute-or logic alu))
-    (def logic-or-multiply (execute-or logic-or-alu multiply))
+    (def long-operation (execute-or multiply divide))
+    (def logic-or-long (execute-or logic-or-alu long-operation))
     (def load-ok (execute-or load-valid byte-valid))
-    (def register-sequential (execute-or load-ok logic-or-multiply))
+    (def register-sequential (execute-or load-ok logic-or-long))
     (def sequential-operation (execute-or register-sequential partial-valid))
     (def control-or-basic (execute-or control-valid basic-accepted))
     (def executable (execute-or control-or-basic sequential-operation))
@@ -45,7 +47,7 @@
     (def data-or-alu (::rv64::arithmetic::select alu data-or-logic alu-data))
     (def data-or-load (::rv64::arithmetic::select load data-or-alu loaded-data))
     (def data-or-byte (::rv64::arithmetic::select byte-load data-or-load byte-data))
-    (def register-data (::rv64::arithmetic::select multiply data-or-byte product))
+    (def register-data (::rv64::arithmetic::select long-operation data-or-byte long-result))
     (def basic-or-control-write (execute-or basic-write control-write))
     (def register-request (execute-or basic-or-control-write register-sequential))
     (def write-register (execute-and valid register-request))

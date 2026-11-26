@@ -20,12 +20,12 @@
     (def rising (nor no-done older-done))
     (def finished (accept-pulse rising running)))
 
-  ;; 乗算を待たない命令または乗算器から完了通知を受け、更新要求を出す。
+  ;; 通常命令または乗算・除算の回路から完了通知を受け、更新要求を出す。
   ;; 完了から更新要求までの tick と、起動時の抑止条件は doc/retire-control.md に従う。
   (module firmware-retire
-    (in simple multiply-finished valid write-register write-memory)
+    (in simple long-finished valid write-register write-memory)
     (out commit register-enable memory-write)
-    (def raw-retire (execute-or simple multiply-finished))
+    (def raw-retire (execute-or simple long-finished))
     (def armed (delay-2 1))
     (def retire (phase-bit raw-retire armed))
     (def commit (accept-pulse retire valid))
@@ -54,9 +54,9 @@
       (instruction-window-from-seed seed commit instruction rd register-data register-enable))
 
     (def (valid multiply next-offset rd register-data write-register memory-address
-          store-data write-memory high-product)
+          store-data write-memory high-product divide signed-mode word-mode remainder-mode)
       (firmware-dispatch instruction pc-offset first-value second-value
-                         probe-data product fetch-valid probe-address))
+                         probe-data long-result fetch-valid probe-address))
 
     (def invalid (nor valid valid))
     (def failure (accept-pulse ready invalid))
@@ -64,7 +64,13 @@
     (def mul-request (execute-and valid multiply))
     (def mul-start (accept-pulse ready mul-request))
     (def (product mul-finished) (firmware-multiply mul-start first-value second-value high-product))
-    (def not-multiply (nor multiply multiply))
-    (def simple (accept-pulse ready not-multiply))
+    (def div-request (execute-and valid divide))
+    (def div-start (accept-pulse ready div-request))
+    (def (division-result div-finished)
+      (firmware-divide div-start first-value second-value signed-mode word-mode remainder-mode))
+    (def long-result (::rv64::arithmetic::select divide product division-result))
+    (def long-finished (execute-or mul-finished div-finished))
+    (def simple-operation (nor multiply divide))
+    (def simple (accept-pulse ready simple-operation))
     (def (commit register-enable memory-write)
-      (firmware-retire simple mul-finished valid write-register write-memory))))
+      (firmware-retire simple long-finished valid write-register write-memory))))

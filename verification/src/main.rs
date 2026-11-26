@@ -106,6 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .chain([
         "execute-load.ncg2",
         "execute-logic.ncg2",
+        "execute-divide.ncg2",
         "subword-memory.ncg2",
         "execute-subword.ncg2",
         "execute-alu.ncg2",
@@ -242,7 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "div-wide-next" => (387, 258),
         "divide-prepare" => (130, 128),
         "divide-result" => (258, 128),
-        "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => (417, 266),
+        "firmware-dispatch" | "firmware-dispatch-core" | "firmware-dispatch-uart" => (417, 270),
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
         "firmware-data-map" => (64, 28),
