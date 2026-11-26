@@ -21,10 +21,12 @@ fn vector(bits: impl Iterator<Item = String> + DoubleEndedIterator) -> String {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let Some(selected @ ("add" | "shift-left" | "boot-ram-address")) =
+    let Some(selected @ ("add" | "shift-left" | "boot-ram-address" | "execute-boot")) =
         args.get(1).map(String::as_str)
     else {
-        return Err("add、shift-left、boot-ram-address のいずれかを指定する。".into());
+        return Err(
+            "add、shift-left、boot-ram-address、execute-boot のいずれかを指定する。".into(),
+        );
     };
     let arithmetic = ["decode.ncg2", "arithmetic.ncg2"];
     let boot = [
@@ -37,10 +39,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "execute-boot.ncg2",
         "boot-machine.ncg2",
     ];
-    let paths = if selected == "boot-ram-address" {
-        &boot[..]
-    } else {
-        &arithmetic[..]
+    let paths = match selected {
+        "boot-ram-address" => &boot[..],
+        "execute-boot" => &["decode.ncg2", "arithmetic.ncg2", "execute-boot.ncg2"],
+        _ => &arithmetic[..],
     };
     let sources = paths
         .iter()
@@ -84,6 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "add" => (128, 64),
         "shift-left" => (70, 64),
         "boot-ram-address" => (64, 12),
+        "execute-boot" => (224, 264),
         _ => unreachable!(),
     };
     assert_eq!((*input_count, outputs.len()), expected_shape);
@@ -100,8 +103,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             name(gate.right)
         );
     }
-    let first = vector((0..64).map(|i| format!("i{i}")));
-    if selected == "boot-ram-address" {
+    if selected == "execute-boot" {
+        for (port, start, stop) in [
+            ("instruction", 0, 32),
+            ("pc", 32, 96),
+            ("rs1", 96, 160),
+            ("rs2", 160, 224),
+        ] {
+            let bits = vector((start..stop).map(|i| format!("i{i}")));
+            println!("(define-fun {port} () (_ BitVec {}) {bits})", stop - start);
+        }
+        for (port, bit) in [("valid", 0), ("register-write", 134), ("store-write", 263)] {
+            println!("(define-fun {port} () Bool {})", name(outputs[bit]));
+        }
+        for (port, start, stop) in [
+            ("next-pc", 1, 65),
+            ("register-index", 65, 70),
+            ("register-data", 70, 134),
+            ("store-address", 135, 199),
+            ("store-data", 199, 263),
+        ] {
+            let bits = vector(outputs[start..stop].iter().copied().map(name));
+            println!("(define-fun {port} () (_ BitVec {}) {bits})", stop - start);
+        }
+        print!("{}", include_str!("execute_boot.smt2"));
+    } else if selected == "boot-ram-address" {
+        let first = vector((0..64).map(|i| format!("i{i}")));
         let mapped = name(outputs[0]);
         let word = vector(outputs[1..].iter().copied().map(name));
         println!("(define-fun address () (_ BitVec 64) {first})");
@@ -115,6 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "(assert (or (distinct {mapped} in-range) (and in-range (distinct ((_ zero_extend 53) {word}) word))))"
         );
     } else {
+        let first = vector((0..64).map(|i| format!("i{i}")));
         let rest = vector((64..*input_count).map(|i| format!("i{i}")));
         let output = vector(outputs.iter().copied().map(name));
         let expected = match selected {

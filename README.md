@@ -70,15 +70,15 @@ ncg2 check programs/boot.ncg2m
 
 固定 ROM から、プロジェクト内の命令イメージを NCG2M で展開した ROM に移行する。
 
-## 算術回路と RAM のアドレス変換を検証する
+## 起動回路の部品を検証する
 
-`::rv64::arithmetic::add` は64ビットの折り返し加算、`::rv64::arithmetic::shift-left` は0から63ビットの論理左シフトを行う。検証ツールは Core が展開した NOR ネットリストを読み、参照仕様と出力が異なる入力が存在するかを Z3 に問い合わせる。RAM のアドレス変換では受理するアドレスの範囲と8バイト整列、および有効アドレスに対応する語の添字を検証する。
+検証ツールは Core が展開した NOR ネットリストを読み、参照仕様と出力が異なる入力が存在するかを Z3 に問い合わせる。対象は64ビットの加算と左シフト、RAM のアドレス変換、[起動用の5種類の命令](doc/boot-execution.md)である。
 
 ```sh
 set -e
 host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
 mkdir -p target/verification
-for circuit in add shift-left boot-ram-address; do
+for circuit in add shift-left boot-ram-address execute-boot; do
   model="target/verification/$circuit.smt2"
   cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
     --target "$host" --target-dir target/verification -- "$circuit" > "$model"
