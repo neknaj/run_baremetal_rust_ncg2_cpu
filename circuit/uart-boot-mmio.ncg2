@@ -1,0 +1,199 @@
+(namespace rv64
+  (export uart-boot-mmio)
+
+  (latch mmio-bit (width 1))
+  (latch mmio-delay-5 (width 5))
+  (latch mmio-delay-12 (width 12))
+  (latch mmio-delay-15 (width 15))
+  (latch mmio-delay-19 (width 19))
+  (latch mmio-upper-read (width 62))
+  (latch mmio-read-data (width 64))
+
+  (func mmio-and (in left right) (out result)
+    (def not-left (nor left left))
+    (def not-right (nor right right))
+    (def result (nor not-left not-right)))
+
+  (func mmio-or (in left right) (out result)
+    (def neither (nor left right))
+    (def result (nor neither neither)))
+
+  ;; 木は左右の段数をそろえ、すべてのアドレスビットを同じ入力tickから判定する。
+
+  (func mmio-any-2 (in (value (bits 2))) (out result)
+    (def low (bit value 0))
+    (def high (bit value 1))
+    (def result (mmio-or low high)))
+
+  (func mmio-any-4 (in (value (bits 4))) (out result)
+    (def low (slice value 0 2))
+    (def high (slice value 2 2))
+    (def any-low (mmio-any-2 low))
+    (def any-high (mmio-any-2 high))
+    (def result (mmio-or any-low any-high)))
+
+  (func mmio-any-8 (in (value (bits 8))) (out result)
+    (def low (slice value 0 4))
+    (def high (slice value 4 4))
+    (def any-low (mmio-any-4 low))
+    (def any-high (mmio-any-4 high))
+    (def result (mmio-or any-low any-high)))
+
+  (func mmio-any-16 (in (value (bits 16))) (out result)
+    (def low (slice value 0 8))
+    (def high (slice value 8 8))
+    (def any-low (mmio-any-8 low))
+    (def any-high (mmio-any-8 high))
+    (def result (mmio-or any-low any-high)))
+
+  (func mmio-any-32 (in (value (bits 32))) (out result)
+    (def low (slice value 0 16))
+    (def high (slice value 16 16))
+    (def any-low (mmio-any-16 low))
+    (def any-high (mmio-any-16 high))
+    (def result (mmio-or any-low any-high)))
+
+  (func mmio-any-64 (in (value (bits 64))) (out result)
+    (def low (slice value 0 32))
+    (def high (slice value 32 32))
+    (def any-low (mmio-any-32 low))
+    (def any-high (mmio-any-32 high))
+    (def result (mmio-or any-low any-high)))
+
+  (func mmio-mask-bit (in denied bit-value) (out result)
+    (def not-value (nor bit-value bit-value))
+    (def result (nor denied not-value)))
+
+  (func mmio-mask-2 (in denied (value (bits 2))) (out (result (bits 2)))
+    (def low (slice value 0 1))
+    (def high (slice value 1 1))
+    (def selected-low (mmio-mask-bit denied low))
+    (def selected-high (mmio-mask-bit denied high))
+    (def result (concat selected-low selected-high)))
+
+  (func mmio-mask-4 (in denied (value (bits 4))) (out (result (bits 4)))
+    (def low (slice value 0 2))
+    (def high (slice value 2 2))
+    (def selected-low (mmio-mask-2 denied low))
+    (def selected-high (mmio-mask-2 denied high))
+    (def result (concat selected-low selected-high)))
+
+  (func mmio-mask-8 (in denied (value (bits 8))) (out (result (bits 8)))
+    (def low (slice value 0 4))
+    (def high (slice value 4 4))
+    (def selected-low (mmio-mask-4 denied low))
+    (def selected-high (mmio-mask-4 denied high))
+    (def result (concat selected-low selected-high)))
+
+  (func mmio-mask-16 (in denied (value (bits 16))) (out (result (bits 16)))
+    (def low (slice value 0 8))
+    (def high (slice value 8 8))
+    (def selected-low (mmio-mask-8 denied low))
+    (def selected-high (mmio-mask-8 denied high))
+    (def result (concat selected-low selected-high)))
+
+  (func mmio-mask-32 (in denied (value (bits 32))) (out (result (bits 32)))
+    (def low (slice value 0 16))
+    (def high (slice value 16 16))
+    (def selected-low (mmio-mask-16 denied low))
+    (def selected-high (mmio-mask-16 denied high))
+    (def result (concat selected-low selected-high)))
+
+  (func mmio-mask-64 (in denied (value (bits 64))) (out (result (bits 64)))
+    (def low (slice value 0 32))
+    (def high (slice value 32 32))
+    (def selected-low (mmio-mask-32 denied low))
+    (def selected-high (mmio-mask-32 denied high))
+    (def result (concat selected-low selected-high)))
+
+  ;; 入力と同じtickから数え、OR木の1段前と最終段に合う値を返す。
+  (module mmio-address-delay
+    (in value)
+    (out earlier latest)
+    (def tail (slice history 0 11))
+    (def data (concat value tail))
+    (def history (mmio-delay-12 data 1))
+    (def earlier (bit history 10))
+    (def latest (bit history 11)))
+
+  ;; 受信状態の公開端子と、同じ状態を読んだ read-data の確定時刻をそろえる。
+  (module mmio-read-flag
+    (in value)
+    (out delayed)
+    (def tail (slice history 0 4))
+    (def data (concat value tail))
+    (def history (mmio-delay-5 data 1))
+    (def delayed (bit history 4)))
+
+  ;; 入力tick t のアドレスと write-enable を対応付け、ACK を t+17 に返す。
+  ;; read-data はアドレス t、受信状態 t+15 の結果を t+19 に返す。
+  ;; STATUS の下位2bitと ready、error は同じ受信状態を観測する。
+  (module uart-mmio-port
+    (in (address (bits 64)) write-enable (word (bits 64)) buffer-ready buffer-error)
+    (out (read-data (bits 64)) ready error ack)
+
+    ;; 0x200000, 0x200008, 0x200010 はビット21だけが共通の1。ビット3と4で端子を選ぶ。
+    (def low (slice address 0 3))
+    (def middle (slice address 5 16))
+    (def high (slice address 22 42))
+    (def common-bits (concat low #b00 middle #b0 high))
+    (def extra-bit (mmio-any-64 common-bits))
+    (def region (bit address 21))
+    (def data-offset (bit address 3))
+    (def ack-offset (bit address 4))
+    (def (region-earlier region-latest) (mmio-address-delay region))
+    (def (data-earlier data-latest) (mmio-address-delay data-offset))
+    (def (ack-earlier ack-latest) (mmio-address-delay ack-offset))
+    (def missing-region (nor region-earlier region-earlier))
+    (def common (nor missing-region extra-bit))
+    (def no-data-offset (nor data-earlier data-earlier))
+    (def no-ack-offset (nor ack-earlier ack-earlier))
+    (def status-position (nor data-latest ack-latest))
+    (def data-position (nor no-data-offset ack-latest))
+    (def ack-position (nor data-latest no-ack-offset))
+    (def status-selected (mmio-and common status-position))
+    (def data-selected (mmio-and common data-position))
+    (def ack-selected (mmio-and common ack-position))
+
+    ;; アドレスの判定が確定する段まで書き込みを遅らせ、別tickのアドレスを混ぜない。
+    (def write-tail (slice write-delay 0 14))
+    (def writes (concat write-enable write-tail))
+    (def write-delay (mmio-delay-15 writes 1))
+    (def write-aligned (bit write-delay 14))
+    (def consume (mmio-and ack-selected write-aligned))
+
+    ;; reset 直後は、判定経路に実際の入力フレームが届くまで公開出力を0に保つ。
+    (def armed-tail (slice arm 0 18))
+    (def armed-input (concat 1 armed-tail))
+    (def arm (mmio-delay-19 armed-input 1))
+    (def ack-armed (bit arm 16))
+    (def ack (mmio-bit consume ack-armed))
+
+    (def no-status (nor status-selected status-selected))
+    (def no-data (nor data-selected data-selected))
+    (def selected-word (mmio-mask-64 no-data word))
+    (def selected-ready (mmio-mask-bit no-status buffer-ready))
+    (def selected-error (mmio-mask-bit no-status buffer-error))
+    (def data-low (bit selected-word 0))
+    (def data-next (bit selected-word 1))
+    (def read-low (mmio-or selected-ready data-low))
+    (def read-next (mmio-or selected-error data-next))
+    ;; 上位62ビットは STATUS の寄与がない。下位の OR と同じ2 tick だけ遅らせる。
+    (def data-upper (slice selected-word 2 62))
+    (def upper-delayed (mmio-upper-read data-upper 1))
+    (def read-upper (mmio-upper-read upper-delayed 1))
+    (def read-combined (concat read-low read-next read-upper))
+    (def read-armed (bit arm 18))
+    (def read-data (mmio-read-data read-combined read-armed))
+    (def ready (mmio-read-flag buffer-ready))
+    (def error (mmio-read-flag buffer-error)))
+
+  ;; write-enable は確定した64ビットの書き込みの1tickパルス。書き込む値を参照しない。
+  ;; 読み出しに副作用はない。ACK 以外のアドレスへの書き込みも受信状態を変えない。
+  (module uart-boot-mmio
+    (in rx (address (bits 64)) write-enable)
+    (out (read-data (bits 64)) ready error)
+    (def (byte valid framing-error) (uart-rx rx))
+    (def (word buffer-ready buffer-error) (uart-word-buffer byte valid framing-error ack))
+    (def (read-data ready error ack)
+      (uart-mmio-port address write-enable word buffer-ready buffer-error))))
