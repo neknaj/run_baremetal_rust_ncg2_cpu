@@ -74,3 +74,19 @@ for part in divide-prepare divide-result; do
   test "$(z3 -smt2 "$model")" = unsat
 done
 ```
+
+## DIV・REM 系の命令判別
+
+`::rv64::execute-divide` は命令語から、判別結果、符号付き指定、W 指定、余り指定の順に4ビットを返す。対象は DIV・DIVU・REM・REMU とそれらの W 命令である。対象外の命令では4ビットをすべて0にする。[RISC-V の命令一覧](https://docs.riscv.org/reference/isa/v20260120/unpriv/rv-32-64g.html)
+
+検証器は命令一覧から取った8つの固定符号化を参照仕様とし、全32ビットの命令語について展開した NOR の4出力を照合する。乗算命令を含む対象外の符号化もこの照合に含まれる。展開した回路は41個の NOR からなり、最長経路は14段である。
+
+```sh
+set -e
+host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
+mkdir -p target/verification
+model=target/verification/execute-divide.smt2
+cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
+  --target "$host" --target-dir target/verification -- execute-divide > "$model"
+test "$(z3 -smt2 "$model")" = unsat
+```
