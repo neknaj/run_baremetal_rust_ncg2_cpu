@@ -1,0 +1,41 @@
+; 命令とレジスタ値から、分岐と PC・レジスタの観測結果を定める。
+(define-fun opcode () (_ BitVec 7) ((_ extract 6 0) instruction))
+(define-fun funct3 () (_ BitVec 3) ((_ extract 14 12) instruction))
+(define-fun rd () (_ BitVec 5) ((_ extract 11 7) instruction))
+(define-fun off-i () (_ BitVec 64)
+  ((_ sign_extend 52) ((_ extract 31 20) instruction)))
+(define-fun off-b () (_ BitVec 64)
+  ((_ sign_extend 51)
+    (concat ((_ extract 31 31) instruction) ((_ extract 7 7) instruction)
+            ((_ extract 30 25) instruction) ((_ extract 11 8) instruction) #b0)))
+(define-fun off-u () (_ BitVec 64)
+  ((_ sign_extend 32) (concat ((_ extract 31 12) instruction) #x000)))
+
+(define-fun auipc () Bool (= opcode #b0010111))
+(define-fun beq () Bool (and (= opcode #b1100011) (= funct3 #b000)))
+(define-fun bne () Bool (and (= opcode #b1100011) (= funct3 #b001)))
+(define-fun bgeu () Bool (and (= opcode #b1100011) (= funct3 #b111)))
+(define-fun jalr () Bool (and (= opcode #b1100111) (= funct3 #b000)))
+(define-fun expected-recognized () Bool (or auipc beq bne bgeu jalr))
+(define-fun taken () Bool
+  (or (and beq (= rs1 rs2)) (and bne (distinct rs1 rs2)) (and bgeu (bvuge rs1 rs2))))
+(define-fun jalr-address () (_ BitVec 64)
+  (bvand (bvadd rs1 off-i) #xfffffffffffffffe))
+(define-fun candidate () (_ BitVec 64)
+  (ite jalr (bvsub jalr-address #x0000000000010000)
+            (ite taken (bvadd pc off-b) (bvadd pc (_ bv4 64)))))
+(define-fun expected-valid () Bool
+  (and expected-recognized
+       (or (not (or taken jalr)) (= (bvurem candidate (_ bv4 64)) (_ bv0 64)))))
+(define-fun expected-register-write () Bool (and expected-valid (or auipc jalr)))
+(define-fun absolute-pc () (_ BitVec 64) (bvadd #x0000000000010000 pc))
+
+(assert (or (distinct recognized expected-recognized)
+            (distinct valid expected-valid)
+            (distinct next-pc (ite expected-valid candidate pc))
+            (distinct register-write expected-register-write)
+            (and expected-register-write (distinct register-index rd))
+            (and expected-register-write auipc
+                 (distinct register-data (bvadd absolute-pc off-u)))
+            (and expected-register-write jalr
+                 (distinct register-data (bvadd absolute-pc (_ bv4 64))))))

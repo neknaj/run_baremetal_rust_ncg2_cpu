@@ -24,12 +24,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let Some(
         selected @ ("add" | "shift-left" | "boot-ram-address" | "execute-boot" | "firmware-rom"
-        | "firmware-fetch" | "firmware-data-map"),
+        | "firmware-fetch" | "firmware-data-map" | "execute-control" | "xor"
+        | "compare-unsigned" | "less-than-unsigned"),
     ) = args.get(1).map(String::as_str)
     else {
-        return Err(
-            "検証対象として add、shift-left、boot-ram-address、execute-boot、firmware-rom、firmware-fetch、firmware-data-map のいずれかを指定する。".into(),
-        );
+        return Err("検証対象の NCG2 関数名を指定する。対象は README と各設計文書を参照。".into());
     };
     let arithmetic = ["decode.ncg2", "arithmetic.ncg2"];
     let boot = [
@@ -45,6 +44,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths = match selected {
         "boot-ram-address" => &boot[..],
         "execute-boot" => &["decode.ncg2", "arithmetic.ncg2", "execute-boot.ncg2"],
+        "execute-control" => &[
+            "decode.ncg2",
+            "arithmetic.ncg2",
+            "execute-boot.ncg2",
+            "execute-control.ncg2",
+        ],
         "firmware-rom" => &["decode.ncg2", "arithmetic.ncg2", "firmware-rom.ncg2"],
         "firmware-fetch" | "firmware-data-map" => &[
             "decode.ncg2",
@@ -96,10 +101,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         outputs,
     } = built.netlist();
     let expected_shape = match selected {
-        "add" => (128, 64),
+        "add" | "xor" => (128, 64),
+        "compare-unsigned" => (128, 2),
+        "less-than-unsigned" => (128, 1),
         "shift-left" => (70, 64),
         "boot-ram-address" => (64, 12),
         "execute-boot" => (224, 264),
+        "execute-control" => (224, 136),
         "firmware-rom" => (5, 64),
         "firmware-fetch" => (64, 33),
         "firmware-data-map" => (64, 28),
@@ -145,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firmware::emit_rom(selected, outputs, &std::fs::read(path)?)?;
     } else if selected == "firmware-data-map" {
         firmware::emit_data_map(outputs);
-    } else if selected == "execute-boot" {
+    } else if matches!(selected, "execute-boot" | "execute-control") {
         for (port, start, stop) in [
             ("instruction", 0, 32),
             ("pc", 32, 96),
@@ -155,20 +163,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let bits = vector((start..stop).map(|i| format!("i{i}")));
             println!("(define-fun {port} () (_ BitVec {}) {bits})", stop - start);
         }
-        for (port, bit) in [("valid", 0), ("register-write", 134), ("store-write", 263)] {
+        let flags: &[(&str, usize)] = if selected == "execute-boot" {
+            &[("valid", 0), ("register-write", 134), ("store-write", 263)]
+        } else {
+            &[("recognized", 0), ("valid", 1), ("register-write", 135)]
+        };
+        for &(port, bit) in flags {
             println!("(define-fun {port} () Bool {})", name(outputs[bit]));
         }
-        for (port, start, stop) in [
-            ("next-pc", 1, 65),
-            ("register-index", 65, 70),
-            ("register-data", 70, 134),
-            ("store-address", 135, 199),
-            ("store-data", 199, 263),
-        ] {
+        let words: &[(&str, usize, usize)] = if selected == "execute-boot" {
+            &[
+                ("next-pc", 1, 65),
+                ("register-index", 65, 70),
+                ("register-data", 70, 134),
+                ("store-address", 135, 199),
+                ("store-data", 199, 263),
+            ]
+        } else {
+            &[
+                ("next-pc", 2, 66),
+                ("register-index", 66, 71),
+                ("register-data", 71, 135),
+            ]
+        };
+        for &(port, start, stop) in words {
             let bits = vector(outputs[start..stop].iter().copied().map(name));
             println!("(define-fun {port} () (_ BitVec {}) {bits})", stop - start);
         }
-        print!("{}", include_str!("execute_boot.smt2"));
+        let specification = if selected == "execute-boot" {
+            include_str!("execute_boot.smt2")
+        } else {
+            include_str!("execute_control.smt2")
+        };
+        print!("{specification}");
     } else if selected == "boot-ram-address" {
         let first = vector((0..64).map(|i| format!("i{i}")));
         let mapped = name(outputs[0]);
@@ -183,12 +210,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "(assert (or (distinct {mapped} in-range) (and in-range (distinct ((_ zero_extend 53) {word}) word))))"
         );
+    } else if matches!(selected, "compare-unsigned" | "less-than-unsigned") {
+        let left = vector((0..64).map(|i| format!("i{i}")));
+        let right = vector((64..128).map(|i| format!("i{i}")));
+        let less = name(outputs[outputs.len() - 1]);
+        if selected == "compare-unsigned" {
+            let equal = name(outputs[0]);
+            println!(
+                "(assert (or (distinct {equal} (= {left} {right})) (distinct {less} (bvult {left} {right}))))"
+            );
+        } else {
+            println!("(assert (distinct {less} (bvult {left} {right})))");
+        }
     } else {
         let first = vector((0..64).map(|i| format!("i{i}")));
         let rest = vector((64..*input_count).map(|i| format!("i{i}")));
         let output = vector(outputs.iter().copied().map(name));
         let expected = match selected {
             "add" => format!("(bvadd {first} {rest})"),
+            "xor" => format!("(bvxor {first} {rest})"),
             "shift-left" => format!("(bvshl {first} ((_ zero_extend 58) {rest}))"),
             _ => unreachable!(),
         };

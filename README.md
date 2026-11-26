@@ -83,13 +83,14 @@ ncg2 check programs/boot.ncg2m
 
 ## 起動回路の部品を検証する
 
-検証ツールは Core が展開した NOR ネットリストを読み、参照仕様と出力が異なる入力が存在するかを Z3 に問い合わせる。対象は64ビットの加算と左シフト、RAM のアドレス変換、[起動用の5種類の命令](doc/boot-execution.md)である。
+検証ツールは Core が展開した NOR ネットリストを読み、参照仕様と出力が異なる入力が存在するかを Z3 に問い合わせる。対象は64ビットの算術・論理・比較、RAM のアドレス変換、[起動用の5種類の命令](doc/boot-execution.md)、[PC 相対の命令と条件分岐](doc/control-execution.md)である。
 
 ```sh
 set -e
 host=$(rustc +1.99.1 -vV | sed -n 's/^host: //p')
 mkdir -p target/verification
-for circuit in add shift-left boot-ram-address execute-boot; do
+for circuit in add shift-left xor compare-unsigned less-than-unsigned \
+  boot-ram-address execute-boot execute-control; do
   model="target/verification/$circuit.smt2"
   cargo +1.99.1 run --quiet --locked --manifest-path verification/Cargo.toml \
     --target "$host" --target-dir target/verification -- "$circuit" > "$model"

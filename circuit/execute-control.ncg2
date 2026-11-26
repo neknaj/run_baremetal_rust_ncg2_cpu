@@ -1,0 +1,94 @@
+(namespace rv64
+  (export execute-control)
+
+  ;; AUIPC と、起動 ELF が使う条件分岐および JALR を処理する。
+  ;; recognized は符号化が対象内であること、valid は遷移を確定できることを示す。
+  (func execute-control
+    (in
+      (instruction (bits 32)) (pc-offset (bits 64))
+      (rs1-value (bits 64)) (rs2-value (bits 64)))
+    (out
+      recognized valid (next-offset (bits 64))
+      (register-index (bits 5)) (register-data (bits 64)) register-write)
+    (def (opcode register-index funct3 rs1-index rs2-index funct7
+          immediate-i immediate-s immediate-b immediate-u immediate-j)
+      (decode instruction))
+
+    ;; 固定 opcode の対応するビットが異なる場合だけ立つ差分を作る。
+    (def op0 (bit opcode 0))
+    (def op1 (bit opcode 1))
+    (def op2 (bit opcode 2))
+    (def op3 (bit opcode 3))
+    (def op4 (bit opcode 4))
+    (def op5 (bit opcode 5))
+    (def op6 (bit opcode 6))
+    (def not-op0 (nor op0 op0))
+    (def not-op1 (nor op1 op1))
+    (def not-op2 (nor op2 op2))
+    (def not-op4 (nor op4 op4))
+    (def not-op5 (nor op5 op5))
+    (def not-op6 (nor op6 op6))
+    (def diff-auipc (concat not-op0 not-op1 not-op2 op3 not-op4 op5 op6))
+    (def diff-branch (concat not-op0 not-op1 op2 op3 op4 not-op5 not-op6))
+    (def diff-jalr (concat not-op0 not-op1 not-op2 op3 op4 not-op5 not-op6))
+    (def auipc (execute-zero-7 diff-auipc))
+    (def branch-opcode (execute-zero-7 diff-branch))
+    (def jalr-opcode (execute-zero-7 diff-jalr))
+
+    (def f0 (bit funct3 0))
+    (def f1 (bit funct3 1))
+    (def f2 (bit funct3 2))
+    (def not-f0 (nor f0 f0))
+    (def not-f1 (nor f1 f1))
+    (def not-f2 (nor f2 f2))
+    (def diff-bne (concat not-f0 f1 f2))
+    (def diff-bgeu (concat not-f0 not-f1 not-f2))
+    (def funct-beq (execute-zero-3 funct3))
+    (def funct-bne (execute-zero-3 diff-bne))
+    (def funct-bgeu (execute-zero-3 diff-bgeu))
+    (def beq (execute-and branch-opcode funct-beq))
+    (def bne (execute-and branch-opcode funct-bne))
+    (def bgeu (execute-and branch-opcode funct-bgeu))
+    (def jalr (execute-and jalr-opcode funct-beq))
+
+    ;; 3種類の分岐は一つの比較を共用する。
+    (def (equal less) (::rv64::arithmetic::compare-unsigned rs1-value rs2-value))
+    (def differs (nor equal equal))
+    (def at-least (nor less less))
+    (def take-beq (execute-and beq equal))
+    (def take-bne (execute-and bne differs))
+    (def take-bgeu (execute-and bgeu at-least))
+    (def take-equality-branch (execute-or take-beq take-bne))
+    (def take-branch (execute-or take-equality-branch take-bgeu))
+    (def equality-branch (execute-or beq bne))
+    (def supported-branch (execute-or equality-branch bgeu))
+    (def writes-register (execute-or auipc jalr))
+    (def recognized (execute-or writes-register supported-branch))
+
+    ;; 分岐先は PC 相対。JALR は絶対アドレスのビット0を消してから相対位置へ戻す。
+    (def four #x0000000000000004)
+    (def boot-base #x0000000000010000)
+    (def minus-boot-base #xffffffffffff0000)
+    (def pc-delta (::rv64::arithmetic::select take-branch four immediate-b))
+    (def pc-derived (::rv64::arithmetic::add pc-offset pc-delta))
+    (def jalr-absolute (::rv64::arithmetic::add rs1-value immediate-i))
+    (def jalr-high (slice jalr-absolute 1 63))
+    (def jalr-even (concat 0 jalr-high))
+    (def jalr-offset (::rv64::arithmetic::add jalr-even minus-boot-base))
+    (def candidate (::rv64::arithmetic::select jalr pc-derived jalr-offset))
+
+    ;; 実際に飛ぶ場合だけ、飛び先が4バイト境界にあることを要求する。
+    (def target-low (bit candidate 0))
+    (def target-middle (bit candidate 1))
+    (def misaligned (execute-or target-low target-middle))
+    (def jumping (execute-or take-branch jalr))
+    (def invalid-target (execute-and jumping misaligned))
+    (def valid-target (nor invalid-target invalid-target))
+    (def valid (execute-and recognized valid-target))
+    (def next-offset (::rv64::arithmetic::select valid pc-offset candidate))
+    (def register-write (execute-and writes-register valid))
+
+    ;; AUIPC は絶対 PC に U 即値を加える。JALR のリンク値は絶対 PC + 4。
+    (def absolute-pc (::rv64::arithmetic::add pc-offset boot-base))
+    (def register-delta (::rv64::arithmetic::select auipc four immediate-u))
+    (def register-data (::rv64::arithmetic::add absolute-pc register-delta))))
