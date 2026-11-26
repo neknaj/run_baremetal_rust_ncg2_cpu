@@ -266,11 +266,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("elf", type=Path)
     parser.add_argument("output", type=Path)
-    encoders = {
-        "image": bytes, "ncg2m": ncg2m_source, "word-bits": word_bits,
-        "ncg2-rom": ncg2_rom_source,
-    }
-    parser.add_argument("--format", choices=encoders, default="image")
+    encoders = {"image": bytes, "ncg2m": ncg2m_source, "word-bits": word_bits}
+    parser.add_argument("--format", choices=(*encoders, "ncg2-rom"), default="image")
     parser.add_argument("--rom-layout", choices=ROM_LAYOUTS, help="ncg2-rom の物理アドレス配置。既定は boot。")
     args = parser.parse_args()
     if args.elf.resolve() == args.output.resolve():
