@@ -4,6 +4,7 @@ use circuitgame2_core::netlist::{ClockedVm, TickInputError, Wire};
 use ncg2_event_queue::{
     EvaluationQueue,
     fanout::{Pin, ReverseDependencies, StoragePins},
+    nor_inputs::PackedNorInputs,
 };
 use std::ops::Range;
 
@@ -28,10 +29,8 @@ struct Storage {
 pub struct EventVm {
     external: usize,
     augmented: usize,
-    gates: Vec<(Pin, Pin)>,
+    nor: PackedNorInputs,
     storage: Vec<Storage>,
-    // 増補入力、NOR の登録出力の順に配置する。
-    values: Vec<bool>,
     users: ReverseDependencies,
     queue: EvaluationQueue,
     changes: Vec<(usize, bool)>,
@@ -49,7 +48,7 @@ impl EventVm {
     ///
     /// # Errors
     ///
-    /// 外部入力、状態素子の出力区間または RAM の容量が展開済みの配線と整合しない場合に返す。
+    /// 外部入力、状態素子の出力区間または RAM の容量が展開済みの配線と整合しない場合や、定数を含む配線の添字を表せない場合に返す。
     pub fn new(vm: &ClockedVm) -> Result<Self, &'static str> {
         let net = vm.netlist();
         let external = vm.external_input_count();
@@ -118,12 +117,12 @@ impl EventVm {
             .map(|pin| matches!(pin, Pin::Constant(true)))
             .collect();
         let output = reset_output.clone();
+        let nor = PackedNorInputs::build(&gates, slots).ok_or("NOR 入力の添字を表せない。")?;
         Ok(Self {
             external,
             augmented,
-            gates,
+            nor,
             storage,
-            values: vec![false; slots],
             users,
             queue: EvaluationQueue::new_all(nodes),
             changes: Vec::with_capacity(slots),
@@ -137,7 +136,7 @@ impl EventVm {
 
     /// すべての内部状態と外部入力を0にし、最初の tick に全素子を評価する。
     pub fn reset(&mut self) -> &[bool] {
-        self.values.fill(false);
+        self.nor.reset();
         for device in &mut self.storage {
             if let Some(ram) = &mut device.ram {
                 ram.fill(false);
@@ -188,15 +187,14 @@ impl EventVm {
 
         self.evaluated = self.queue.pending_count();
         while let Some(node) = self.queue.pop() {
-            if node < self.gates.len() {
-                let (left, right) = self.gates[node];
-                let value = !(left.read(&self.values) || right.read(&self.values));
+            if node < self.nor.gate_count() {
+                let value = self.nor.next(node);
                 let slot = self.augmented + node;
-                if self.values[slot] != value {
+                if self.nor.read_only()[slot] != value {
                     self.changes.push((slot, value));
                 }
             } else {
-                self.evaluate_storage(node - self.gates.len());
+                self.evaluate_storage(node - self.nor.gate_count());
             }
         }
 
@@ -213,7 +211,7 @@ impl EventVm {
             ram[start..start + word.len()].copy_from_slice(word);
 
             // 同じ入力のままでも、次の read-first 読み出しは新しい語を読む。
-            let node = self.gates.len() + index;
+            let node = self.nor.gate_count() + index;
             self.queue.insert(node);
         }
         self.ram_writes.clear();
@@ -221,10 +219,9 @@ impl EventVm {
     }
 
     fn publish(&mut self, slot: usize, value: bool) {
-        if self.values[slot] == value {
+        if !self.nor.set(slot, value) {
             return;
         }
-        self.values[slot] = value;
         let (nodes, outputs) = self
             .users
             .readers(slot)
@@ -237,23 +234,23 @@ impl EventVm {
 
     fn evaluate_storage(&mut self, index: usize) {
         let device = &self.storage[index];
-        let enabled = device.pins.enable.read(&self.values);
+        let enabled = device.pins.enable.read(self.nor.read_only());
         if let Some(ram) = &device.ram {
             let mut word = 0;
             for (bit, &pin) in device.pins.address.iter().enumerate() {
-                word |= usize::from(pin.read(&self.values)) << bit;
+                word |= usize::from(pin.read(self.nor.read_only())) << bit;
             }
             let start = word * device.output.len();
             let read = &ram[start..start + device.output.len()];
             for (slot, &value) in device.output.clone().zip(read) {
-                if self.values[slot] != value {
+                if self.nor.read_only()[slot] != value {
                     self.changes.push((slot, value));
                 }
             }
             if enabled {
                 let mut changed = false;
                 for ((slot, &pin), &old) in device.output.clone().zip(&device.pins.data).zip(read) {
-                    let value = pin.read(&self.values);
+                    let value = pin.read(self.nor.read_only());
                     changed |= value != old;
                     self.write_data[slot] = value;
                 }
@@ -263,8 +260,8 @@ impl EventVm {
             }
         } else if enabled {
             for (slot, &pin) in device.output.clone().zip(&device.pins.data) {
-                let value = pin.read(&self.values);
-                if self.values[slot] != value {
+                let value = pin.read(self.nor.read_only());
+                if self.nor.read_only()[slot] != value {
                     self.changes.push((slot, value));
                 }
             }

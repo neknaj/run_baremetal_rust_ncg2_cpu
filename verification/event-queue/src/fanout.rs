@@ -17,6 +17,14 @@ pub enum Pin {
 }
 
 impl Pin {
+    /// 正規化した配線の読み出し値を表す。
+    pub open spec fn value_model(self, values: Seq<bool>) -> bool {
+        match self {
+            Self::Slot(slot) => values[slot as int],
+            Self::Constant(bit) => bit,
+        }
+    }
+
     /// 同じ tick の参照値を得る。
     ///
     /// # Panics
@@ -25,10 +33,7 @@ impl Pin {
     #[inline]
     pub fn read(self, values: &[bool]) -> (value: bool)
         requires self matches Self::Slot(slot) ==> slot < values@.len(),
-        ensures value == match self {
-            Self::Slot(slot) => values@[slot as int],
-            Self::Constant(bit) => bit,
-        },
+        ensures value == self.value_model(values@),
     {
         match self {
             Self::Slot(slot) => values[slot],

@@ -4,6 +4,7 @@
 extern crate alloc;
 
 pub mod fanout;
+pub mod nor_inputs;
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
