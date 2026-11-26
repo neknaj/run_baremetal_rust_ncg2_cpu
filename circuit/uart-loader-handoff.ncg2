@@ -1,0 +1,78 @@
+(namespace rv64
+  (export uart-loader-handoff)
+  (latch handoff-bus-register (width 128))
+
+  (func handoff-select-bit (in choose clear set) (out value)
+    (def not-choose (nor choose choose))
+    (def not-clear (nor clear clear))
+    (def not-set (nor set set))
+    (def selected-clear (nor choose not-clear))
+    (def selected-set (nor not-choose not-set))
+    (def neither (nor selected-clear selected-set))
+    (def value (nor neither neither)))
+
+  ;; ローダーの完了通知の後にポートを渡し、選択器が確定してから初回要求を一度だけ通す。
+  ;; ローダーは許可を出す前の32 tick にアドレスとデータを保持し、最初の16 tick は許可を出さない。
+  ;; 最後の許可から2 tick 以上待って loader-finished を立て、その後は許可を出さず完了を保持する。
+  (module uart-loader-handoff
+    (in (probe-address (bits 64))
+        (loader-address (bits 64)) (loader-data (bits 64)) loader-write loader-finished)
+    (out (pc (bits 64)) (bus-address (bits 64)) (read-data (bits 64))
+         owner issue commit stopped bus-write)
+    (def (pc cpu-address cpu-data cpu-write issue commit stopped)
+      (uart-loaded-machine launch probe-address read-data))
+    (def (bus-address bus-data bus-write owner launch)
+      (uart-loader-route loader-address loader-data loader-write loader-finished
+        cpu-address cpu-data cpu-write))
+    (def read-data (uart-ram bus-address bus-data bus-write)))
+
+  ;; loader-finished は、ローダーが最後の要求を出し終えてから立てる。
+  ;; ポートの切替前に、先行する書き込みに与えたアドレスとデータを RAM に到達させる。
+  (module uart-loader-route
+    (in (loader-address (bits 64)) (loader-data (bits 64)) loader-write loader-finished
+        (cpu-address (bits 64)) (cpu-data (bits 64)) cpu-write)
+    (out (bus-address (bits 64)) (bus-data (bits 64)) bus-write owner launch)
+    (def transfer (delay-8 loader-finished))
+    (def owner (phase-bit 1 transfer))
+    (def launch-level (delay-8 owner))
+    (def launch-inverse (nor launch-level launch-level))
+    (def launch-older (delay-2 launch-level))
+    (def launch-edge (nor launch-inverse launch-older))
+    (def launch (accept-pulse launch-edge 1))
+
+    (def selected-address (::rv64::arithmetic::select owner loader-address cpu-address))
+    (def selected-data (::rv64::arithmetic::select owner loader-data cpu-data))
+    (def selected-write (handoff-select-bit owner loader-write cpu-write))
+
+    ;; 起動時の NOR の過渡値を許可線へ通さない。選択後のアドレスとデータを許可と同じ3段で渡す。
+    (def arm-write (delay-16 1))
+    (def bus-write (accept-pulse selected-write arm-write))
+    (def selected-frame (concat selected-address selected-data))
+    (def staged-frame (handoff-bus-register selected-frame 1))
+    (def guarded-frame (handoff-bus-register staged-frame 1))
+    (def bus-frame (handoff-bus-register guarded-frame 1))
+    (def bus-address (slice bus-frame 0 64))
+    (def bus-data (slice bus-frame 64 64)))
+
+  ;; 最初は先頭の 0x10000 を指し、最初の退役以降は確定した物理 PC を使う。
+  (module uart-loaded-machine
+    (in launch (probe-address (bits 64)) (read-data (bits 64)))
+    (out (pc (bits 64)) (address (bits 64)) (write-data (bits 64)) write
+         issue commit stopped)
+    (def next-pc (::rv64::arithmetic::uart-absolute-pc next-offset))
+    (def stored-pc (program-counter next-pc commit))
+    (def started (phase-bit 1 commit))
+    (def pc (::rv64::arithmetic::select started #x0000000000010000 stored-pc))
+    (def offset (::rv64::arithmetic::uart-pc-offset pc))
+    (def (word-address fetch-valid high-half) (uart-app-fetch-address pc))
+    (def capture-window (delay-64 issue))
+    (def capture (delay-8 capture-window))
+    (def fetch-phase (phase-mode issue capture))
+    (def address (::rv64::arithmetic::select fetch-phase data-address word-address))
+    (def app-instruction (uart-instruction-from-word high-half read-data))
+    (def instruction-frame (concat app-instruction fetch-valid))
+    (def fetched (uart-fetched-instruction instruction-frame capture))
+    (def instruction (slice fetched 0 32))
+    (def instruction-valid (bit fetched 32))
+    (def (issue next-offset data-address write-data register-data register-enable write commit stopped)
+      (firmware-engine-from-seed launch offset instruction instruction-valid read-data probe-address))))

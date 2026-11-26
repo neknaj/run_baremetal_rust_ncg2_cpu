@@ -39,8 +39,19 @@
         (probe-data (bits 64)) (probe-address (bits 64)))
     (out issue (next-offset (bits 64)) (memory-address (bits 64)) (store-data (bits 64))
          (register-data (bits 64)) register-enable memory-write commit stopped)
+    (def seed (instruction-reset-seed))
+    (def (issue next-offset memory-address store-data register-data register-enable
+          memory-write commit stopped)
+      (firmware-engine-from-seed seed pc-offset instruction fetch-valid probe-data probe-address)))
+
+  ;; 外部のロード経路が RAM を引き渡したときは、seed から最初の命令を発行する。
+  (module firmware-engine-from-seed
+    (in seed (pc-offset (bits 64)) (instruction (bits 32)) fetch-valid
+        (probe-data (bits 64)) (probe-address (bits 64)))
+    (out issue (next-offset (bits 64)) (memory-address (bits 64)) (store-data (bits 64))
+         (register-data (bits 64)) register-enable memory-write commit stopped)
     (def (first-value second-value ready issue)
-      (instruction-window commit instruction rd register-data register-enable))
+      (instruction-window-from-seed seed commit instruction rd register-data register-enable))
 
     (def (valid multiply next-offset rd register-data write-register memory-address
           store-data write-memory high-product)

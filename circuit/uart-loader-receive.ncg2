@@ -1,0 +1,17 @@
+(namespace rv64
+  (export uart-loader-receive uart-loader-receive-8)
+
+  ;; RX からリトルエンディアンの完成語を取り出す。
+  ;; ack はローダーが保持中の語を受理したときに1 tick だけ適用する内部の通知である。
+  (module uart-loader-receive
+    (in rx ack)
+    (out (word (bits 64)) ready error)
+    (def (byte valid framing-error) (uart-rx rx))
+    (def (word ready error) (uart-word-buffer byte valid framing-error ack)))
+
+  ;; 同じ語バッファとポート順で、8 tick/bit の RX を受け取る。
+  (module uart-loader-receive-8
+    (in rx ack)
+    (out (word (bits 64)) ready error)
+    (def (byte valid framing-error) (uart-rx-8 rx))
+    (def (word ready error) (uart-word-buffer byte valid framing-error ack))))

@@ -206,6 +206,46 @@ impl PackedNorInputs {
         true
     }
 
+
+    /// 入力列が、現在の配線値の同じ長さの先頭部分と一致するか調べる。
+    ///
+    /// 定数用の位置は配線値に含めない。入力列が配線数より長い場合は false を返す。
+    #[inline]
+    pub fn input_matches(&self, input: &[bool]) -> (same: bool)
+        ensures same <==> input@.len() <= self.wire_count_model()
+            && self.wires_model().take(input@.len() as int) == input@,
+    {
+        proof { use_type_invariant(self); }
+        if input.len() > self.bits.len() - 2 {
+            return false;
+        }
+        let mut same = true;
+        let mut i = 0;
+        while i < input.len()
+            invariant i <= input@.len() <= self.wire_count_model(),
+                self.wire_count_model() + 2 == self.bits@.len(),
+                same <==> (forall|at: int| 0 <= at < i ==> self.bits@[at] == #[trigger] input@[at]),
+            decreases input.len() - i,
+        {
+            // 全要素を比較し、差の有無を一つの値に集約する。
+            let equal = self.bits[i] == input[i];
+            proof {
+                if same && equal {
+                    assert forall|at: int| 0 <= at < i + 1
+                        implies self.bits@[at] == #[trigger] input@[at] by {
+                        if at == i { assert(self.bits@[at] == input@[at]); }
+                    };
+                } else if same {
+                    assert(self.bits@[i as int] != input@[i as int]);
+                }
+            }
+            same &= equal;
+            i += 1;
+        }
+        assert(same <==> self.wires_model().take(input@.len() as int) =~= input@);
+        same
+    }
+
     /// 定数用の位置も含めた読み出し用の列を表す。
     pub closed spec fn slots_model(&self) -> Seq<bool> { self.bits@ }
 

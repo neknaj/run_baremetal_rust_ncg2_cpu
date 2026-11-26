@@ -17,15 +17,78 @@ use circuitgame2_core::{
 /// UART 波形の1ビットを保持する tick 数。
 pub const BIT_TICKS: usize = 16;
 
+/// 連続転送の波形と実受信回路に共通のビット周期。
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub enum ContinuousRate {
+    Standard,
+    Fast,
+}
+
+impl ContinuousRate {
+    /// 8N1 の各ビットを一定に保つ tick 数。
+    pub fn bit_ticks(self) -> usize {
+        match self {
+            Self::Standard => BIT_TICKS,
+            Self::Fast => 8,
+        }
+    }
+
+    fn receiver(self) -> &'static str {
+        match self {
+            Self::Standard => "uart-loader-receive",
+            Self::Fast => "uart-loader-receive-8",
+        }
+    }
+}
+
 /// プロジェクトの公開ポートを照合し、検証に使う VM を組み立てる。
 pub fn machine(path: &Path) -> Result<ClockedVm, Box<dyn Error>> {
+    lower_project(path, "uart-system", "uart-system", &[("rx", 1), ("probe-address", 64)],
+        &[("pc", 64), ("bus-address", 64), ("bus-read-data", 64), ("uart-ready", 1),
+          ("uart-error", 1), ("commit", 1), ("stopped", 1), ("bus-write", 1)])
+}
+
+/// 連続転送の CPU・RAM 回路と UART 受信回路を同じプロジェクトから展開する。
+///
+/// # Errors
+///
+/// 設定、展開済み配線、または公開ポートの順序と幅が実行器の契約を満たさない場合に返す。
+#[allow(dead_code)]
+pub fn continuous_machines(
+    path: &Path, rate: ContinuousRate,
+) -> Result<(ClockedVm, ClockedVm), Box<dyn Error>> {
+    let entry = "uart-loader-handoff";
+    let handoff = lower_project(
+        path, entry, entry,
+        &[("probe-address", 64), ("loader-address", 64), ("loader-data", 64),
+          ("loader-write", 1), ("loader-finished", 1)],
+        &[("pc", 64), ("bus-address", 64), ("read-data", 64), ("owner", 1),
+          ("issue", 1), ("commit", 1), ("stopped", 1), ("bus-write", 1)],
+    )?;
+    let receiver = lower_project(
+        path, entry, rate.receiver(),
+        &[("rx", 1), ("ack", 1)],
+        &[("word", 64), ("ready", 1), ("error", 1)],
+    )?;
+    Ok((handoff, receiver))
+}
+
+fn lower_project(
+    path: &Path,
+    entry: &str,
+    module: &str,
+    inputs: &[(&str, usize)],
+    outputs: &[(&str, usize)],
+) -> Result<ClockedVm, Box<dyn Error>> {
     let config = circuitgame2_project_config::parse(&fs::read(path)?)
         .map_err(|error| format!("実行設定: {error:?}"))?;
-    if config.entry.as_ref().map(|entry| entry.get_ref().as_str()) != Some("::rv64::uart-system")
+    let expected_entry = format!("::rv64::{entry}");
+    if config.entry.as_ref().map(|entry| entry.get_ref().as_str()) != Some(expected_entry.as_str())
         || !config.device.is_empty()
         || !config.vram.is_empty()
     {
-        return Err("外部デバイスと VRAM 設定のない ::rv64::uart-system を指定する。".into());
+        return Err(format!("外部デバイスと VRAM 設定のない {expected_entry} を指定する。").into());
     }
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     let paths = config.sources.get_ref();
@@ -50,7 +113,7 @@ pub fn machine(path: &Path) -> Result<ClockedVm, Box<dyn Error>> {
         .declarations()
         .declaration(NameKey {
             parent: Some("rv64"),
-            name: "uart-system",
+            name: module,
         })
         .ok_or("UART の実行入口が見つからない。")?;
     let file = project
@@ -91,25 +154,10 @@ pub fn machine(path: &Path) -> Result<ClockedVm, Box<dyn Error>> {
                 },
             )
     };
-    if !matches(
-        &sites.inputs,
-        &compiled.inputs,
-        &[("rx", 1), ("probe-address", 64)],
-    ) || !matches(
-        &sites.outputs,
-        &compiled.outputs,
-        &[
-            ("pc", 64),
-            ("bus-address", 64),
-            ("bus-read-data", 64),
-            ("uart-ready", 1),
-            ("uart-error", 1),
-            ("commit", 1),
-            ("stopped", 1),
-            ("bus-write", 1),
-        ],
-    ) {
-        return Err("UART 回路の公開ポート名、順序、幅が検証対象と異なる。".into());
+    if !matches(&sites.inputs, &compiled.inputs, inputs)
+        || !matches(&sites.outputs, &compiled.outputs, outputs)
+    {
+        return Err(format!("::rv64::{module} の公開ポート名、順序、幅が検証対象と異なる。").into());
     }
     Ok(compiled.vm)
 }
@@ -122,19 +170,19 @@ pub fn word(bits: &[bool]) -> u64 {
 }
 
 /// 8N1 の開始、データ、停止ビットを物理 RX の tick に広げる。
-pub fn waveform(bytes: [u8; 8]) -> impl Iterator<Item = bool> {
-    bytes.into_iter().flat_map(|byte| {
+pub fn waveform(bytes: [u8; 8], rate: ContinuousRate) -> impl Iterator<Item = bool> {
+    bytes.into_iter().flat_map(move |byte| {
         std::iter::once(false)
             .chain((0..8).map(move |bit| (byte >> bit) & 1 != 0))
             .chain(std::iter::once(true))
-            .flat_map(|level| std::iter::repeat_n(level, BIT_TICKS))
+            .flat_map(move |level| std::iter::repeat_n(level, rate.bit_ticks()))
     })
 }
 
 /// 受信語の有効性が立ってから消費されるまで、RX をアイドルに保つ。
 pub fn send<E>(bytes: [u8; 8], mut tick: impl FnMut(bool) -> Result<bool, E>) -> Result<bool, E> {
     let mut ready = false;
-    for level in waveform(bytes) {
+    for level in waveform(bytes, ContinuousRate::Standard) {
         ready |= tick(level)?;
     }
     for _ in 0..20_000 {
